@@ -46,58 +46,45 @@ Connecting third-party webhooks (Stripe, GitHub, Midtrans, Discord, Shopify) dir
 
 ## Architecture
 
-```
-+---------------------------+
-|     Webhook Sources       |
-|  GitHub / Stripe / HMAC   |
-+-----------+---------------+
-            |
-     POST /v1/ingest/:id
-            |
-            v
-+-----------------------------------------------------------+
-|                    Ingestion Layer                         |
-|                                                           |
-|  Fastify HTTP --> Raw Body Capture --> HMAC Verify         |
-|                                          |                |
-|                         Idempotency Guard (CAS)           |
-|                         BEGIN IMMEDIATE + UNIQUE           |
-+----------------------------+------------------------------+
-                             |
-                      202 Accepted
-                      event persisted
-                             |
-                             v
-+-----------------------------------------------------------+
-|               SQLite WAL Storage Engine                    |
-|                                                           |
-|  journal_mode=WAL / synchronous=NORMAL / mmap=256MB       |
-|                                                           |
-|  endpoints --> incoming_events --> delivery_attempts       |
-|                                        |                  |
-|                                   dead_letter_queue       |
-+----------------------------+------------------------------+
-                             |
-                        Lease Loop
-                             |
-                             v
-+-----------------------------------------------------------+
-|                 Dispatch Worker Engine                     |
-|                                                           |
-|  Decorrelated Jitter Backoff --> HTTP POST downstream     |
-|                                        |                  |
-|  Circuit Breaker <------------------->-+                  |
-|  (CLOSED / OPEN / HALF-OPEN)           |                  |
-|                                        |                  |
-|  max_attempts exceeded --> DLQ Eviction                   |
-|                                                           |
-|  POST /v1/dlq/:id/replay --> Re-enqueue to RECEIVED      |
-+----------------------------+------------------------------+
-                             |
-                             v
-+---------------------------+
-|   Downstream Services     |
-+---------------------------+
+```mermaid
+flowchart TD
+    subgraph Sources["Webhook Sources"]
+        GH["GitHub\nHMAC-SHA256"]
+        ST["Stripe\nv1 Timestamped"]
+        MT["Midtrans\nSHA-512"]
+        GN["Generic\nHMAC"]
+    end
+
+    Sources -->|"POST /v1/ingest/:endpointId"| IL
+
+    subgraph IL["Ingestion Layer"]
+        direction LR
+        FH["Fastify HTTP\nRaw Body Capture"] --> SV["Signature\nVerification"]
+        SV --> IG["Idempotency Guard\nBEGIN IMMEDIATE + CAS"]
+    end
+
+    IL -->|"202 Accepted"| DB
+
+    subgraph DB["SQLite WAL Storage Engine"]
+        direction LR
+        EP["endpoints"] --> IE["incoming_events"]
+        IE --> DA["delivery_attempts"]
+        DA --> DLQ["dead_letter_queue"]
+    end
+
+    DB -->|"Lease Loop"| DW
+
+    subgraph DW["Dispatch Worker Engine"]
+        direction LR
+        JB["Decorrelated Jitter\nBackoff"] --> CB["Circuit Breaker\nCLOSED / OPEN / HALF-OPEN"]
+        CB --> DQ["DLQ Eviction\n& Replay API"]
+    end
+
+    DW -->|"HTTP POST"| DS["Downstream Services"]
+
+    OB["Observability\n/health · /metrics"]
+    IL -.-> OB
+    DW -.-> OB
 ```
 
 ---
