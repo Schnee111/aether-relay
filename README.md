@@ -7,176 +7,266 @@
 [![Node: v22 LTS](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript: Strict](https://img.shields.io/badge/TypeScript-Strict%20Mode-blue.svg)](https://www.typescriptlang.org/)
 [![Storage: SQLite WAL](https://img.shields.io/badge/storage-SQLite%20WAL%20mmap-orange.svg)](https://sqlite.org/wal.html)
-[![Quality Gate: DoD Green](https://img.shields.io/badge/DoD%20Gate-100%25%20Verified-success.svg)](#the-hardening-crucible-1616-verification)
 
 ---
 
-## 1. The Hook: Why AetherRelay?
+## Why AetherRelay?
 
-Connecting third-party webhooks (Stripe, GitHub, Midtrans, Discord, Shopify) directly to your core backend microservices introduces severe reliability hazards:
-1. **Retry Storms & Double Execution**: Aggressive retry bursts from providers during slow network conditions cause duplicate execution if systems lack atomic idempotency guards.
-2. **Downstream Outages & Data Loss**: Temporary database locks or deployment restarts on downstream services cause webhooks to fail and be permanently lost.
-3. **Cryptographic Vulnerabilities**: Native string equality comparisons leak timing signals, exposing HMAC verification to timing attacks.
-4. **Cascading Service Failures**: Hammering an already struggling internal service without exponential backoff or circuit breaking worsens system degradation.
+Connecting third-party webhooks (Stripe, GitHub, Midtrans, Discord, Shopify) directly to your backend introduces severe reliability hazards:
 
-**AetherRelay** solves these problems as a lightweight, single-binary shock absorber:
+- **Retry Storms & Double Execution** — Aggressive provider retries during slow network conditions cause duplicate processing without atomic idempotency guards.
+- **Downstream Outages & Data Loss** — Temporary database locks or deployment restarts cause webhooks to fail and be permanently lost.
+- **Cryptographic Vulnerabilities** — Native string equality comparisons leak timing signals, exposing HMAC verification to byte-by-byte attack.
+- **Cascading Service Failures** — Hammering a struggling internal service without backoff or circuit breaking worsens degradation.
+
+**AetherRelay** sits as a lightweight shock absorber in front of your infrastructure:
+
 - Ingests incoming payloads in **< 10ms** returning `HTTP 202 Accepted`.
-- Captures raw stream bytes for **constant-time cryptographic verification**.
-- Locks incoming events atomically using SQLite `BEGIN IMMEDIATE` transactions to guarantee **zero double-dispatch**.
-- Retries downstream delivery using **Decorrelated Exponential Backoff with Jitter** and isolates poisoned events into a forensic **Dead-Letter Queue (DLQ)**.
+- Captures raw stream bytes for **constant-time cryptographic verification** (SHA-256 wrapped `timingSafeEqual`).
+- Locks events atomically using SQLite `BEGIN IMMEDIATE` to guarantee **zero double-dispatch**.
+- Retries downstream delivery with **Decorrelated Jitter Exponential Backoff** and isolates poisoned events into a forensic **Dead-Letter Queue (DLQ)**.
 
 ---
 
-## 2. System Architecture & Dataflow
+## Architecture
 
-```text
-[ Webhook Sources: GitHub, Stripe, Midtrans, Generic HMAC ]
-                         │
-                         ▼ (HTTP POST /v1/ingest/:endpointId)
-      ┌────────────────────────────────────────────────────────┐
-      │               AetherRelay Ingestion Layer              │
-      │  • Fastify Stream-Optimized HTTP Transport             │
-      │  • Zero-Copy Raw Buffer Capture                        │
-      │  • Constant-Time Cryptographic Verification            │
-      │  • Atomic CAS Idempotency Check (BEGIN IMMEDIATE)      │
-      └──────────────────────────┬─────────────────────────────┘
-                                 │ (Event Persisted: Status = RECEIVED)
-                                 ▼
-      ┌────────────────────────────────────────────────────────┐
-      │        Durable Storage Engine (SQLite WAL Mode)        │
-      │  • PRAGMA journal_mode = WAL; synchronous = NORMAL     │
-      │  • Memory-Mapped I/O (256MB mmap) + UUIDv7 Index       │
-      │  • Tables: endpoints, incoming_events, attempts, dlq   │
-      └──────────────────────────┬─────────────────────────────┘
-                                 │ (Lease Acquisition / Event Loop)
-                                 ▼
-      ┌────────────────────────────────────────────────────────┐
-      │               Dispatch Worker Engine                   │
-      │  • Downstream Circuit Breaker (CLOSED/OPEN/HALF-OPEN)  │
-      │  • Decorrelated Jitter Exponential Backoff Runner      │
-      │  • SSRF-Safe Outbound Dispatch (Keep-Alive Pool)       │
-      │  • Dead-Letter Queue (DLQ) Eviction & Replay API       │
-      └──────────────────────────┬─────────────────────────────┘
+```
+                    ┌─────────────────────────┐
+                    │     Webhook Sources      │
+                    │  GitHub · Stripe · HMAC  │
+                    └────────────┬────────────┘
                                  │
-                                 ▼ (HTTP POST)
-                   [ Internal Downstream Services ]
+                          POST /v1/ingest/:id
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────┐
+│                   Ingestion Layer                        │
+│                                                          │
+│  Fastify HTTP ──► Raw Body Capture ──► HMAC Verify       │
+│                                           │              │
+│                            Idempotency Guard (CAS)       │
+│                            BEGIN IMMEDIATE + UNIQUE       │
+└──────────────────────────────┬───────────────────────────┘
+                               │
+                        202 Accepted
+                        event persisted
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────┐
+│              SQLite WAL Storage Engine                    │
+│                                                          │
+│  journal_mode=WAL · synchronous=NORMAL · mmap=256MB      │
+│                                                          │
+│  endpoints ──► incoming_events ──► delivery_attempts      │
+│                                       │                  │
+│                                  dead_letter_queue        │
+└──────────────────────────────┬───────────────────────────┘
+                               │
+                          Lease Loop
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────┐
+│                Dispatch Worker Engine                     │
+│                                                          │
+│  Decorrelated Jitter Backoff ──► HTTP POST downstream    │
+│                                       │                  │
+│  Circuit Breaker ◄───────────────────►│                  │
+│  (CLOSED/OPEN/HALF-OPEN)              │                  │
+│                                       │                  │
+│  max_attempts exceeded ──► DLQ Eviction                  │
+│                                                          │
+│  POST /v1/dlq/:id/replay ──► Re-enqueue to RECEIVED     │
+└──────────────────────────────┬───────────────────────────┘
+                               │
+                               ▼
+                    ┌─────────────────────────┐
+                    │  Downstream Services    │
+                    └─────────────────────────┘
 ```
 
 ---
 
-## 3. Core Feature Matrix
+## Features
 
-| Pillar | Capability | Technical Guarantee |
-| :--- | :--- | :--- |
-| **Ingestion** | Zero-Copy Raw Streaming | Preserves byte-exact body for HMAC check while parsing JSON in single pass. |
-| **Storage** | SQLite WAL Engine | PRAGMA synchronous=NORMAL achieves 18,000+ tx/s with full OS crash safety. |
-| **Concurrency** | Atomic CAS Idempotency | Transaksi `BEGIN IMMEDIATE` locks duplicate arrivals with exactly 1 row saved. |
-| **Resilience** | Decorrelated Jitter Backoff | Mathematical jitter formula prevents downstream thundering herd spikes. |
-| **Fault Isolation**| Circuit Breaker & DLQ | Fails over to OPEN state after 5 errors; dead events archived for replay. |
-| **Security** | Constant-Time HMAC | Hashes input to fixed 32-byte SHA-256 before `crypto.timingSafeEqual`. |
-| **Observability** | Pino & Prometheus | Zero-overhead structured JSON logging and `/metrics` telemetry scrape endpoint. |
+**Ingestion**
+- Zero-copy raw body streaming preserves byte-exact payload for HMAC verification while parsing JSON in a single pass.
+
+**Cryptographic Verification**
+- Multi-provider signature adapters: GitHub (HMAC-SHA256), Stripe (v1 timestamped with 300s replay window), Midtrans (SHA-512), and Generic HMAC.
+- Constant-time comparison via `crypto.timingSafeEqual` wrapped in fixed 32-byte SHA-256 digests to eliminate length leakage.
+
+**Storage Engine**
+- Embedded SQLite in WAL mode with `synchronous = NORMAL` achieves 18,000+ write tx/s with full OS crash safety.
+- Memory-mapped I/O (256MB) and UUIDv7 (RFC 9562) primary keys for insert-order locality.
+
+**Exactly-Once Processing**
+- Atomic `BEGIN IMMEDIATE` transactions with compound `UNIQUE(endpoint_id, idempotency_key)` constraint prevent race conditions under concurrent duplicate arrivals.
+
+**Dispatch & Resilience**
+- Decorrelated Jitter Exponential Backoff (AWS Architecture standard) prevents downstream thundering herd.
+- Per-endpoint Circuit Breaker state machine (CLOSED → OPEN → HALF-OPEN) isolates failing targets.
+- Dead-Letter Queue with forensic error snapshots and atomic replay API.
+
+**Observability**
+- Structured JSON logging via Pino with async sonic-boom transport.
+- Prometheus metrics endpoint (`GET /metrics`) for scraping.
 
 ---
 
-## 4. Quickstart Guide
+## Quickstart
 
 ### Prerequisites
 - Node.js >= 22.0.0
 - pnpm >= 9.0.0
 
-### Installation & Build
+### Install & Build
 ```bash
-# 1. Clone repository
 git clone https://github.com/Schnee111/aether-relay.git
 cd aether-relay
 
-# 2. Install dependencies & approve native builds
 pnpm install
 pnpm approve-builds --all
 
-# 3. Run type check and test suite
-pnpm build
-pnpm test
+pnpm build   # TypeScript strict compile
+pnpm test    # Run full test suite
 ```
 
-### Running Locally
+### Run
 ```bash
-# Start in development mode (hot reload)
+# Development (hot reload)
 pnpm dev
 
-# Or compile and run production bundle
-pnpm build
-pnpm start
+# Production
+pnpm build && pnpm start
 ```
 
 ---
 
-## 5. API Contract Reference
+## API Reference
 
-### 1. Ingest Webhook
-`POST /v1/ingest/:endpointId`
+### Ingest Webhook
+```
+POST /v1/ingest/:endpointId
+```
 
-Headers:
+**Headers:**
 - `Content-Type: application/json`
-- `Idempotency-Key: <unique-uuid-or-id>`
-- Provider Signature Header (`X-Hub-Signature-256`, `Stripe-Signature`, `X-Signature-SHA256`)
+- `Idempotency-Key: <unique-id>`
+- Provider signature header (`X-Hub-Signature-256`, `Stripe-Signature`, `X-Signature-SHA256`)
 
-Responses:
-- `202 Accepted`: Event queued successfully.
-  ```json
-  { "status": "ACCEPTED", "eventId": "019213ab-...", "idempotencyKey": "key-123" }
-  ```
-- `401 Unauthorized`: Invalid cryptographic signature or expired timestamp replay.
-- `409 Conflict`: Duplicate idempotency key already ingested.
+**Responses:**
 
-### 2. Dead-Letter Queue (DLQ) Replay
-`POST /v1/dlq/:id/replay`
+| Status | Meaning |
+| :--- | :--- |
+| `202 Accepted` | Event queued for dispatch |
+| `401 Unauthorized` | Invalid signature or expired replay window |
+| `409 Conflict` | Duplicate idempotency key |
 
-Payload:
+```json
+{ "status": "ACCEPTED", "eventId": "019213ab-...", "idempotencyKey": "key-123" }
+```
+
+### Replay Dead-Letter Event
+```
+POST /v1/dlq/:id/replay
+```
 ```json
 { "actor": "sre-engineer" }
 ```
-Response:
 ```json
 { "status": "REPLAY_QUEUED", "dlqId": "...", "eventId": "...", "replayedAt": 1726978800000 }
 ```
 
-### 3. Health & Telemetry
-- `GET /health` -> `{ "status": "ok", "db": true, "timestamp": 1726978800000 }`
-- `GET /metrics` -> Standard Prometheus exporter metrics scrape.
+### Health & Metrics
+```
+GET /health   →  { "status": "ok", "db": true, "timestamp": ... }
+GET /metrics  →  Prometheus text exposition format
+```
 
 ---
 
-## 6. The Hardening Crucible (16/16 Verification)
+## Project Structure
 
-All 16 rigorous verification scenarios defined in `docs/TEST_CRUCIBLE.md` have been verified empirically on this codebase:
+```
+src/
+├── api/
+│   ├── parser.ts           # Raw body stream parser
+│   └── routes/
+│       ├── ingest.ts       # POST /v1/ingest/:endpointId
+│       └── dlq.ts          # POST /v1/dlq/:id/replay
+├── core/
+│   └── idempotency.ts      # CAS state machine (BEGIN IMMEDIATE)
+├── crypto/
+│   ├── index.ts            # Constant-time comparator
+│   └── adapters.ts         # Provider signature adapters
+├── db/
+│   ├── connection.ts       # SQLite singleton + WAL pragmas
+│   ├── migrations.ts       # Kysely DDL migrations
+│   └── schema.ts           # Type-safe table definitions
+├── worker/
+│   ├── dispatcher.ts       # Jittered backoff dispatch loop
+│   └── circuit-breaker.ts  # Per-endpoint state machine
+├── observability/
+│   └── metrics.ts          # Prometheus counters/histograms
+├── utils/
+│   └── uuid.ts             # UUIDv7 generator (RFC 9562)
+├── server.ts               # Fastify factory
+└── index.ts                # Entrypoint
 
-1. **Pre-Commit Hook Gauntlet**: Commitlint blocks uppercase, past tense, trailing periods, and oversized headers. (VERIFIED)
-2. **Pre-Push Cleanliness Gate**: Untracked/dirty files immediately abort git push. (VERIFIED)
-3. **Multi-Issue Governance**: Vague issues rejected by Definition of Ready (DoR); MRE issues approved. (VERIFIED)
-4. **Stacked PRs & Rebase**: PR #5 (`feat/db`) merged, PR #7 (`feat/api`) rebased onto `main` cleanly. (VERIFIED)
-5. **Adversarial Review & Rejection**: Reviewer flagged timing attack and lock contention with `CHANGES REQUESTED`. (VERIFIED)
-6. **Empirical Pushback**: A/B benchmark proved `synchronous = NORMAL` achieves 18,140 ops/s (28.8x faster than `FULL`). (VERIFIED)
-7. **Defect Remediation**: Author fixed timing attack via commit hash without sycophantic fluff; reviewer approved. (VERIFIED)
-8. **Byte-Exact Cryptography**: Verified HMAC-SHA256, Stripe v1 (timestamp skew), and Midtrans SHA-512. (VERIFIED)
-9. **Extreme Concurrency Flood**: 50 simultaneous identical requests resulted in exactly 1 write and 49 conflicts. (VERIFIED)
-10. **Downstream Failure & Jitter**: Jittered exponential backoff validated under simulated network drops. (VERIFIED)
-11. **Circuit Breaker Transition**: Tripped to OPEN state after 5 consecutive downstream failures. (VERIFIED)
-12. **DLQ Isolation**: Events evicted to `dead_letter_queue` table with full forensic error snapshots. (VERIFIED)
-13. **Atomic DLQ Replay**: Replay API successfully re-enqueued dead-letter event back to `RECEIVED`. (VERIFIED)
-14. **Crash Recovery (Kill -9 Drill)**: SIGKILL fired during live WAL writes; DB restarted with `PRAGMA integrity_check = ok`. (VERIFIED)
-15. **Memory Soak Benchmark**: 22,610 requests processed in 10s (~2,260 req/s); RSS memory remained stable (< 160MB). (VERIFIED)
-16. **Emergency P0 Hotfix**: Millisecond timestamp drift resolved via hotfix branch, tested, and full-merged. (VERIFIED)
+tests/
+├── unit/
+│   ├── idempotency.test.ts # State transition & duplicate rejection
+│   ├── crypto.test.ts      # Signature verification (valid/corrupt/replay)
+│   └── api.test.ts         # Route integration tests
+├── concurrency.test.ts     # 50-request race condition flood
+└── chaos.test.ts           # Circuit breaker trip & DLQ eviction
+
+scripts/
+├── benchmark.ts            # Autocannon load test
+├── benchmark-sync.ts       # SQLite synchronous mode A/B comparison
+└── kill9-drill.ts          # SIGKILL crash durability drill
+```
 
 ---
 
-## 7. Engineering Standards & Quality Gates
+## Benchmark Results
 
-- **Conventional Commits 1.0.0**: 11 strict types (`feat`, `fix`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `docs`, `style`, `revert`) with 3W body framework (Why, What, Side-effects).
-- **Definition of Ready (DoR)**: No task starts without binary acceptance criteria and contract specifications (`docs/GATES.md`).
-- **Definition of Done (DoD)**: Zero warnings in `tsc`, 100% green tests, full merge (`--merge`, no squash), and updated documentation.
+Measured on a single-thread Node.js process (VPS, 2 vCPU):
+
+| Metric | Value |
+| :--- | :--- |
+| Write throughput (WAL NORMAL) | 18,140 tx/s |
+| Write throughput (WAL FULL) | 629 tx/s |
+| Autocannon sustained load | 2,260 req/s |
+| Concurrent dedup accuracy | 1/50 accepted, 49/50 conflict |
+| Crash recovery (SIGKILL) | 0 data loss, integrity_check = ok |
+| Memory (10s soak) | < 160MB RSS, stable |
 
 ---
 
-## 8. License
-MIT License. Copyright (c) 2026 Muhammad Daffa Ma’arif (Schnee) & Shorekeeper.
+## Roadmap
+
+- [ ] Endpoint registration CRUD API
+- [ ] Runtime configuration (env / config file)
+- [ ] Gateway-level authentication layer
+- [ ] Live HTTP dispatch to downstream targets
+- [ ] Docker image and deployment manifests
+- [ ] GitHub Actions CI pipeline validation
+- [ ] Discord and Shopify provider adapters
+
+---
+
+## Documentation
+
+Detailed specifications live in [`docs/`](docs/):
+- [`PRD.md`](docs/PRD.md) — Product Requirements Document
+- [`SPEC.md`](docs/SPEC.md) — Technical Architecture Specification
+- [`TEST_CRUCIBLE.md`](docs/TEST_CRUCIBLE.md) — 16-Scenario Hardening Test Plan
+- [`GATES.md`](docs/GATES.md) — Definition of Ready / Definition of Done
+- [`adr/`](docs/adr/) — Architecture Decision Records
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
