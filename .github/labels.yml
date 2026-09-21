@@ -1,0 +1,75 @@
+- name: "priority:P0-critical"
+  color: "B60205"
+  description: "Outage, data loss, security breach. Tangani segera!"
+
+- name: "priority:P1-high"
+  color: "D93F0B"
+  description: "Fitur utama bermasalah, memblokir workflow pengguna."
+
+- name: "priority:P2-medium"
+  color: "FBCA04"
+  description: "Bug fungsional non-blocking atau fitur standar."
+
+- name: "priority:P3-low"
+  color: "0E8A16"
+  description: "Minor polish, typo docs, enhancement kecil."
+
+- name: "type:bug"
+  color: "EE0701"
+  description: "Kesalahan runtime, anomali data, atau crash."
+
+- name: "type:feature"
+  color: "1D76DB"
+  description: "Permintaan fungsionalitas baru atau RFC produk."
+
+- name: "type:tech-debt"
+  color: "5319E7"
+  description: "Refactoring arsitektur, optimasi kode, utang teknis."
+
+- name: "type:chore"
+  color: "BFDADC"
+  description: "Pemeliharaan tooling, build runner, CI/CD dependency."
+
+- name: "type:rfc"
+  color: "C5DEF5"
+  description: "Request for Comments diskusi rancangan arsitektur."
+
+- name: "type:security"
+  color: "000000"
+  description: "Patch kerentanan dan audit hardening."
+
+- name: "status:triage-needed"
+  color: "EDEDED"
+  description: "Issue baru yang perlu dievaluasi oleh Tech Lead."
+
+- name: "status:ready-for-dev"
+  color: "0E8A16"
+  description: "Sudah memenuhi DoR, siap dikerjakan oleh developer/agent."
+
+- name: "status:in-progress"
+  color: "FBCA04"
+  description: "Sedang dalam tahap pengerjaan aktif."
+
+- name: "status:blocked"
+  color: "B60205"
+  description: "Terhambat oleh blocker eksternal atau tiket lain."
+
+- name: "status:in-review"
+  color: "1D76DB"
+  description: "PR terbuka dan sedang dalam tahap verifikasi DoD."
+
+- name: "component:api"
+  color: "C2E0C6"
+  description: "Backend microservice, REST/gRPC endpoints."
+
+- name: "component:frontend"
+  color: "BFDADC"
+  description: "Web application, UI/UX components."
+
+- name: "component:database"
+  color: "F9D0C4"
+  description: "Schema migrations, query planning, storage."
+
+- name: "component:infra"
+  color: "D4C5F9"
+  description: "Docker, Kubernetes, Cloud networking, CI/CD."
