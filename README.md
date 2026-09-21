@@ -6,7 +6,23 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node: v22 LTS](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript: Strict](https://img.shields.io/badge/TypeScript-Strict%20Mode-blue.svg)](https://www.typescriptlang.org/)
-[![Storage: SQLite WAL](https://img.shields.io/badge/storage-SQLite%20WAL%20mmap-orange.svg)](https://sqlite.org/wal.html)
+[![Fastify](https://img.shields.io/badge/Fastify-v5-000000.svg?logo=fastify)](https://fastify.dev/)
+[![SQLite WAL](https://img.shields.io/badge/SQLite-WAL%20Mode-003B57.svg?logo=sqlite)](https://sqlite.org/wal.html)
+[![Kysely](https://img.shields.io/badge/Kysely-Query%20Builder-6366f1.svg)](https://kysely.dev/)
+[![Vitest](https://img.shields.io/badge/Vitest-Testing-6E9F18.svg?logo=vitest)](https://vitest.dev/)
+[![pnpm](https://img.shields.io/badge/pnpm-Package%20Manager-F69220.svg?logo=pnpm)](https://pnpm.io/)
+
+## Tech Stack
+
+| Layer | Technology |
+| :--- | :--- |
+| Runtime | Node.js 22 LTS, TypeScript 5 (strict mode) |
+| HTTP Server | Fastify 5 with zero-copy raw body parser |
+| Database | SQLite 3 WAL mode via better-sqlite3 + Kysely query builder |
+| Crypto | Node.js `crypto` module (HMAC-SHA256, SHA-512, timingSafeEqual) |
+| Observability | Pino (structured JSON logging) + prom-client (Prometheus metrics) |
+| Testing | Vitest + Autocannon (load testing) |
+| Build | tsx (dev), tsc (production), pnpm |
 
 ---
 
@@ -31,57 +47,57 @@ Connecting third-party webhooks (Stripe, GitHub, Midtrans, Discord, Shopify) dir
 ## Architecture
 
 ```
-                    ┌─────────────────────────┐
-                    │     Webhook Sources      │
-                    │  GitHub · Stripe · HMAC  │
-                    └────────────┬────────────┘
-                                 │
-                          POST /v1/ingest/:id
-                                 │
-                                 ▼
-┌──────────────────────────────────────────────────────────┐
-│                   Ingestion Layer                        │
-│                                                          │
-│  Fastify HTTP ──► Raw Body Capture ──► HMAC Verify       │
-│                                           │              │
-│                            Idempotency Guard (CAS)       │
-│                            BEGIN IMMEDIATE + UNIQUE       │
-└──────────────────────────────┬───────────────────────────┘
-                               │
-                        202 Accepted
-                        event persisted
-                               │
-                               ▼
-┌──────────────────────────────────────────────────────────┐
-│              SQLite WAL Storage Engine                    │
-│                                                          │
-│  journal_mode=WAL · synchronous=NORMAL · mmap=256MB      │
-│                                                          │
-│  endpoints ──► incoming_events ──► delivery_attempts      │
-│                                       │                  │
-│                                  dead_letter_queue        │
-└──────────────────────────────┬───────────────────────────┘
-                               │
-                          Lease Loop
-                               │
-                               ▼
-┌──────────────────────────────────────────────────────────┐
-│                Dispatch Worker Engine                     │
-│                                                          │
-│  Decorrelated Jitter Backoff ──► HTTP POST downstream    │
-│                                       │                  │
-│  Circuit Breaker ◄───────────────────►│                  │
-│  (CLOSED/OPEN/HALF-OPEN)              │                  │
-│                                       │                  │
-│  max_attempts exceeded ──► DLQ Eviction                  │
-│                                                          │
-│  POST /v1/dlq/:id/replay ──► Re-enqueue to RECEIVED     │
-└──────────────────────────────┬───────────────────────────┘
-                               │
-                               ▼
-                    ┌─────────────────────────┐
-                    │  Downstream Services    │
-                    └─────────────────────────┘
++---------------------------+
+|     Webhook Sources       |
+|  GitHub / Stripe / HMAC   |
++-----------+---------------+
+            |
+     POST /v1/ingest/:id
+            |
+            v
++-----------------------------------------------------------+
+|                    Ingestion Layer                         |
+|                                                           |
+|  Fastify HTTP --> Raw Body Capture --> HMAC Verify         |
+|                                          |                |
+|                         Idempotency Guard (CAS)           |
+|                         BEGIN IMMEDIATE + UNIQUE           |
++----------------------------+------------------------------+
+                             |
+                      202 Accepted
+                      event persisted
+                             |
+                             v
++-----------------------------------------------------------+
+|               SQLite WAL Storage Engine                    |
+|                                                           |
+|  journal_mode=WAL / synchronous=NORMAL / mmap=256MB       |
+|                                                           |
+|  endpoints --> incoming_events --> delivery_attempts       |
+|                                        |                  |
+|                                   dead_letter_queue       |
++----------------------------+------------------------------+
+                             |
+                        Lease Loop
+                             |
+                             v
++-----------------------------------------------------------+
+|                 Dispatch Worker Engine                     |
+|                                                           |
+|  Decorrelated Jitter Backoff --> HTTP POST downstream     |
+|                                        |                  |
+|  Circuit Breaker <------------------->-+                  |
+|  (CLOSED / OPEN / HALF-OPEN)           |                  |
+|                                        |                  |
+|  max_attempts exceeded --> DLQ Eviction                   |
+|                                                           |
+|  POST /v1/dlq/:id/replay --> Re-enqueue to RECEIVED      |
++----------------------------+------------------------------+
+                             |
+                             v
++---------------------------+
+|   Downstream Services     |
++---------------------------+
 ```
 
 ---
