@@ -57,6 +57,20 @@ describe('Cryptographic Signature Adapters', () => {
     });
     expect(replayResult.isValid).toBe(false);
     expect(replayResult.reason).toContain('replay detected');
+
+    // Millisecond timestamp support (13-digit)
+    const msTimestamp = Date.now();
+    const msSignedPayload = `${msTimestamp}.${rawPayload.toString('utf-8')}`;
+    const msSig = crypto.createHmac('sha256', testSecret).update(msSignedPayload).digest('hex');
+    const msHeader = `t=${msTimestamp},v1=${msSig}`;
+
+    const msResult = verifyWebhookSignature({
+      provider: 'stripe',
+      secret: testSecret,
+      rawBody: rawPayload,
+      headers: { 'stripe-signature': msHeader },
+    });
+    expect(msResult.isValid).toBe(true);
   });
 
   it('validates Midtrans SHA512 signature correctly', () => {
