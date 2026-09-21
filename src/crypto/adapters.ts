@@ -52,7 +52,11 @@ export function verifyWebhookSignature(ctx: VerificationContext): VerificationRe
 
       // Replay attack tolerance check (300 seconds)
       const nowSec = Math.floor(Date.now() / 1000);
-      const sentSec = parseInt(timestamp, 10);
+      let sentSec = parseInt(timestamp, 10);
+      // Auto-normalize millisecond epoch timestamps (13-digit) to seconds (10-digit)
+      if (sentSec > 9999999999) {
+        sentSec = Math.floor(sentSec / 1000);
+      }
       if (isNaN(sentSec) || Math.abs(nowSec - sentSec) > 300) {
         return { isValid: false, reason: 'Stripe timestamp drift exceeds 300s window (replay detected)' };
       }
