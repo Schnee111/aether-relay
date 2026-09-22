@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **scaffold**: initialize Rust workspace with Axum 0.8, tokio 1.x, rusqlite, tracing-subscriber, and config-rs (#4).
 - **db**: embedded SQLite WAL migrations for endpoints, incoming_events, delivery_attempts, and dead_letter_queue via rusqlite r2d2 connection pool (#4).
-- **core**: atomic CAS idempotency engine using SQLite `BEGIN IMMEDIATE` transactions guaranteeing exactly-once delivery (#4).
+- **core**: atomic CAS idempotency engine using SQLite transactions that deduplicates replayed webhooks at ingest (#4). Downstream delivery is at-least-once; consumers must remain idempotent.
 - **crypto**: multi-provider signature verification adapters: GitHub (HMAC-SHA256), Stripe (v1 timestamped + replay window), Midtrans (SHA-512), Discord (Ed25519 verify_strict), and Generic HMAC (#4).
 - **crypto**: constant-time comparison enforcement across all adapters using `hmac::Mac::verify_slice()` and `ed25519_dalek::verify_strict()`.
 - **api**: ingestion route `POST /v1/ingest/:endpoint_id` with zero-copy raw body extraction via axum::body::Bytes and optional API key gateway authentication (#4).
