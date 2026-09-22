@@ -47,26 +47,29 @@ pub enum DispatchOutcome {
     Deferred,
 }
 
-/// Atomically move the oldest RECEIVED event to PROCESSING and return its id.
+/// Atomically move the oldest RECEIVED event to PROCESSING.
 ///
 /// Uses `BEGIN IMMEDIATE` so two workers can never claim the same row.
-fn claim_next_event(pool: &DbPool) -> Result<Option<String>, AppError> {
+/// Returns the `(event_id, endpoint_id)` pair so callers that record
+/// per-endpoint observations (metrics, logs) use the stable endpoint
+/// identifier rather than the unique event id.
+fn claim_next_event(pool: &DbPool) -> Result<Option<(String, String)>, AppError> {
     let mut conn = pool.get().map_err(|e| AppError::Database(e.to_string()))?;
 
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-    let event_id: Option<String> = tx
+    let claimed: Option<(String, String)> = tx
         .query_row(
-            "SELECT id FROM incoming_events WHERE status = ?1 ORDER BY created_at ASC, id ASC LIMIT 1",
+            "SELECT id, endpoint_id FROM incoming_events WHERE status = ?1 ORDER BY created_at ASC, id ASC LIMIT 1",
             params![EventStatus::Received.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-    if let Some(id) = &event_id {
+    if let Some((id, _)) = &claimed {
         tx.execute(
             "UPDATE incoming_events SET status = ?1 WHERE id = ?2",
             params![EventStatus::Processing.as_str(), id],
@@ -75,7 +78,7 @@ fn claim_next_event(pool: &DbPool) -> Result<Option<String>, AppError> {
     }
 
     tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
-    Ok(event_id)
+    Ok(claimed)
 }
 
 /// Claim and dispatch at most one event.
@@ -93,7 +96,7 @@ pub async fn run_dispatch_once(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))??;
 
-    let Some(event_id) = claimed else {
+    let Some((event_id, endpoint_id)) = claimed else {
         return Ok(DispatchOutcome::Idle);
     };
 
@@ -112,7 +115,7 @@ pub async fn run_dispatch_once(
         Ok(_) => "success",
         Err(_) => "failure",
     };
-    crate::api::middleware::metrics::record_dispatch_metrics(&event_id, outcome_label);
+    crate::api::middleware::metrics::record_dispatch_metrics(&endpoint_id, outcome_label);
 
     match outcome {
         Ok(result) if result.deferred => Ok(DispatchOutcome::Deferred),

@@ -119,4 +119,14 @@ async fn metrics_endpoint_counts_ingest_and_parses() {
         text.contains("provider=\"generic\""),
         "provider label missing"
     );
+    // The path label must carry the matched route TEMPLATE, never the raw URI
+    // (that would let client input inflate Prometheus series cardinality).
+    assert!(
+        text.contains("path=\"/v1/ingest/{endpoint_id}\""),
+        "path label must be the route template, got no template label in:\n{text}"
+    );
+    assert!(
+        !text.contains("path=\"/v1/ingest/ep-metrics\""),
+        "raw URI leaked into the path label"
+    );
 }

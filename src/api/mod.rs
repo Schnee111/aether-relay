@@ -25,11 +25,14 @@ pub fn create_router(state: AppState) -> Router {
 
     if metrics_enabled {
         router = router.route("/metrics", get(middleware::metrics::metrics_endpoint));
+        // HTTP request metrics only cost per-request allocations when someone
+        // is actually scraping them. route_layer (not layer) runs the
+        // middleware AFTER route matching, so MatchedPath is populated and
+        // the path label carries the route template.
+        router = router.route_layer(axum::middleware::from_fn(
+            middleware::metrics::track_metrics,
+        ));
     }
 
-    router
-        .layer(axum::middleware::from_fn(
-            middleware::metrics::track_metrics,
-        ))
-        .with_state(state)
+    router.with_state(state)
 }

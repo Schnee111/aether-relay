@@ -1,4 +1,4 @@
-use axum::extract::Request;
+use axum::extract::{MatchedPath, Request};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -10,38 +10,43 @@ static PROMETHEUS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle
 /// Install the Prometheus exporter and metric descriptions exactly once, and
 /// only when `metrics.enabled` is true. Returns the handle used by the
 /// `/metrics` endpoint to render the exposition text.
+///
+/// Uses `get_or_init` so concurrent callers cannot race, and tolerates
+/// `SetRecorderError`: if another component already installed a global
+/// recorder (e.g. a parallel test harness), we keep our own handle —
+/// it still renders this exporter's registry.
 pub fn install_prometheus_exporter() -> metrics_exporter_prometheus::PrometheusHandle {
-    if let Some(handle) = PROMETHEUS_HANDLE.get() {
-        return handle.clone();
-    }
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    let _ = PROMETHEUS_HANDLE.set(handle.clone());
-    metrics::set_global_recorder(recorder).expect("metrics recorder not already set");
+    PROMETHEUS_HANDLE
+        .get_or_init(|| {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _ = metrics::set_global_recorder(recorder);
 
-    describe_counter!(
-        "aether_webhook_ingest_total",
-        "Webhook ingest requests by endpoint, provider, and HTTP status"
-    );
-    describe_histogram!(
-        "aether_webhook_ingest_duration_seconds",
-        "Ingest handler latency in seconds by endpoint and provider"
-    );
-    describe_counter!(
-        "aether_dispatch_attempts_total",
-        "Downstream dispatch attempts by endpoint and outcome"
-    );
-    describe_counter!(
-        "aether_sqlite_write_errors_total",
-        "SQLite acquisition or write failures surfaced inside the API"
-    );
-    describe_gauge!(
-        "aether_circuit_breaker_state",
-        "Circuit breaker state per endpoint (0=closed, 1=half-open, 2=open)"
-    );
-    describe_gauge!("aether_dlq_size", "Dead-letter queue depth");
+            describe_counter!(
+                "aether_webhook_ingest_total",
+                "Webhook ingest requests by endpoint, provider, and HTTP status"
+            );
+            describe_histogram!(
+                "aether_webhook_ingest_duration_seconds",
+                "Ingest handler latency in seconds by endpoint and provider"
+            );
+            describe_counter!(
+                "aether_dispatch_attempts_total",
+                "Downstream dispatch attempts by endpoint and outcome"
+            );
+            describe_counter!(
+                "aether_sqlite_write_errors_total",
+                "SQLite acquisition or write failures surfaced inside the API"
+            );
+            describe_gauge!(
+                "aether_circuit_breaker_state",
+                "Circuit breaker state per endpoint (0=closed, 1=half-open, 2=open)"
+            );
+            describe_gauge!("aether_dlq_size", "Dead-letter queue depth");
 
-    handle
+            handle
+        })
+        .clone()
 }
 
 /// Render the Prometheus exposition text. Returns 404 when metrics are
@@ -60,8 +65,16 @@ pub async fn metrics_endpoint() -> impl IntoResponse {
 }
 
 /// Per-request HTTP metrics. Registered as a layer for every route.
+///
+/// The `path` label uses the matched route template (e.g.
+/// `/v1/ingest/{endpoint_id}`), falling back to `"unmatched"`, so client
+/// input can never inflate Prometheus series cardinality.
 pub async fn track_metrics(req: Request, next: Next) -> Response {
-    let path = req.uri().path().to_string();
+    let path = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| "unmatched".to_string());
     let method = req.method().to_string();
 
     let response = next.run(req).await;
