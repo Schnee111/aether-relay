@@ -37,3 +37,7 @@ Jika salah satu poin di atas belum terpenuhi, issue wajib diberi label `status:b
    - Berkas `README.md`, `docs/SPEC.md`, atau skema OpenAPI telah disinkronkan dengan perubahan antarmuka atau variabel lingkungan baru.
 6. **Zero-Downtime & Backward Compatibility**:
    - Perubahan skema database SQLite bersifat non-destructive dan kompatibel dengan rollback atomik (`git revert -m 1`).
+7. **Local Build Artifact Cleanup (Disk Hygiene)**:
+   - Setelah menjalankan gate lokal (`cargo fmt/test/clippy/audit`) atau smoke container manual di VPS, WAJIB mengeksekusi `scripts/ci/cleanup-local.sh`.
+   - VPS memiliki SSD terbatas (~59 GB). Build Rust (`target/`) menghasilkan 2–4 GB dan smoke Docker image + BuildKit cache ~3 GB per run; tanpa cleanup, disk mencapai 99% dalam beberapa iterasi CI.
+   - Script ini juga wajib dipanggil oleh autonomous CI sentinels setelah sesi remediasi lokal selesai.
