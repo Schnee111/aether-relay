@@ -42,6 +42,12 @@ jobs:
       - name: Security audit
         run: cargo audit
 
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          sudo ln -sf /usr/bin/musl-gcc /usr/local/bin/x86_64-linux-musl-gcc
+
       - name: Build musl binary
         run: cargo build --release --target x86_64-unknown-linux-musl
 
