@@ -110,3 +110,16 @@ jobs:
 
           ls -la /tmp/relay-data
           docker rm -f relay-vol
+
+  cleanup:
+    name: Prune smoke artifacts
+    needs: smoke
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove smoke containers and image
+        run: |
+          docker rm -f relay-smoke relay-vol 2>/dev/null || true
+          docker rmi aether-relay:smoke 2>/dev/null || true
+          docker builder prune -af 2>/dev/null | tail -1 || true
+          echo "smoke artifacts pruned"

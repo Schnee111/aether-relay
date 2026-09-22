@@ -58,3 +58,10 @@ jobs:
           path: target/x86_64-unknown-linux-musl/release/aether-relay
           retention-days: 7
           if-no-files-found: error
+
+      - name: Prune build outputs
+        if: always()
+        run: |
+          du -sh target 2>/dev/null || true
+          rm -rf target
+          echo "target pruned"
