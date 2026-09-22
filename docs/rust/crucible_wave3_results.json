@@ -1,0 +1,65 @@
+[
+  {
+    "scenario": "Scenario 18: Binary Size Verification",
+    "binary_bytes": 10605760,
+    "binary_mib": 10.11,
+    "binary_mb": 10.61,
+    "docker_mb": 9.7,
+    "passed": true,
+    "verdict": "PASS"
+  },
+  {
+    "scenario": "Scenario 19: Cold Start Benchmark",
+    "trials": 10,
+    "min_ms": 8.94,
+    "max_ms": 16.66,
+    "avg_ms": 11.0,
+    "p50_ms": 10.61,
+    "p95_ms": 16.66,
+    "threshold_ms": 50.0,
+    "passed": true,
+    "verdict": "PASS"
+  },
+  {
+    "scenario": "Scenario 17: Memory Soak Test",
+    "duration_sec": 60,
+    "initial_rss_mb": 6.77,
+    "peak_rss_mb": 13.36,
+    "final_rss_mb": 17.59,
+    "first_half_avg_rss_mb": 10.06,
+    "second_half_avg_rss_mb": 11.07,
+    "rss_drift_mb": 1.01,
+    "total_requests_sent": 31637,
+    "total_requests_ok": 31636,
+    "threshold_max_mb": 20.0,
+    "passed": true,
+    "verdict": "PASS"
+  },
+  {
+    "scenario": "Ingestion Throughput & Latency Benchmark",
+    "total_requests": 3000,
+    "concurrency": 20,
+    "elapsed_sec": 1.4,
+    "throughput_rps": 2147.0,
+    "p50_ms": 6.43,
+    "p90_ms": 13.23,
+    "p95_ms": 16.66,
+    "p99_ms": 41.03,
+    "statuses": {
+      "202": 3000
+    },
+    "metrics_verified": true,
+    "passed": true,
+    "verdict": "PASS"
+  },
+  {
+    "scenario": "Scenario 20: cargo audit Clean",
+    "returncode": 0,
+    "output_summary": [
+      "      Loaded 1261 security advisories (from /home/ubuntu/.cargo/advisory-db)",
+      "    Scanning Cargo.lock for vulnerabilities (292 crate dependencies)"
+    ],
+    "passed": true,
+    "verdict": "PASS"
+  }
+]

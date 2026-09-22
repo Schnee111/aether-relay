@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **observability**: Prometheus `/metrics` endpoint (`metrics-exporter-prometheus`) exposing `aether_webhook_ingest_total`, `aether_webhook_ingest_duration_seconds`, `aether_dispatch_attempts_total`, `aether_sqlite_write_errors_total`, `aether_http_requests_total`. Gated by `[metrics] enabled`: when false the exporter is not installed and the endpoint answers 404. Integration test asserts counter increment and exposition format.
 - **crucible**: Wave 1 empirical report — kill -9 durability (10/10 survive, integrity ok), WAL checkpoint bounded under 15k-event burst, idempotency race guard (1 row from 50 racing duplicates), zero SQLITE_BUSY under 100 concurrent requests.
+- **benchmarks**: Wave 3 empirical benchmark suite (`scripts/crucible_wave3.py`) covering all Phase 5 Rust-specific bonus scenarios: Scenario 17 (memory soak 60s: peak 13.36 MB, +1.01 MB drift, zero monotonic leak across 31.6k requests), Scenario 18 (binary size: 10.61 MB musl binary, 9.70 MB scratch Docker image), Scenario 19 (cold start: 10.61 ms p50 across 10 cold instances), Scenario 20 (cargo audit: 0 advisories across 292 crates), and throughput (2,147.0 req/s, p99 = 41.03 ms).
 
 ## [0.2.0] - 2026-09-22
 
