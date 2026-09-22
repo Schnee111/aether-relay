@@ -1,48 +1,25 @@
 # AetherRelay
 
-> **High-Performance Webhook Ingestion & Reliable Dispatch Gateway**  
-> *A crash-resilient, at-least-once webhook shock-absorber with ingest-time deduplication, built with Axum and embedded SQLite WAL.*
+A lightweight webhook ingestion and dispatch gateway written in Rust, backed by embedded SQLite WAL storage.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust: Stable](https://img.shields.io/badge/Rust-stable-red.svg?logo=rust)](https://www.rust-lang.org/)
-[![Axum](https://img.shields.io/badge/Axum-v0.8-orange.svg?logo=tower)](https://axum.rs/)
-[![SQLite WAL](https://img.shields.io/badge/SQLite-WAL%20Mode-003B57.svg?logo=sqlite)](https://sqlite.org/wal.html)
-[![rusqlite](https://img.shields.io/badge/rusqlite-Synchronous-blue.svg)](https://docs.rs/rusqlite/)
-[![tokio](https://img.shields.io/badge/tokio-Async-dc6fff.svg?logo=tokio)](https://tokio.rs/)
-[![tests](https://github.com/Schnee111/aether-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/Schnee111/aether-relay/actions/workflows/ci.yml)
-[![audit](https://img.shields.io/badge/cargo--audit-clean-brightgreen.svg)](https://rustsec.org/advisories/)
-[![bin: <10MB](https://img.shields.io/badge/bin-size-%3C10MB-brightgreen.svg)](https://github.com/Schnee111/aether-relay/releases)
-
-## Tech Stack
-
-| Layer | Technology |
-| :--- | :--- |
-| Language | Rust 2024 edition (stable) |
-| Async Runtime | tokio 1.x (multi-thread, full features) |
-| HTTP Server | Axum 0.8 + Tower middleware |
-| Database | SQLite 3 WAL mode via rusqlite + r2d2 pool |
-| Crypto | hmac + sha2 (RustCrypto) + ed25519-dalek (constant-time) |
-| Observability | tracing + tracing-subscriber (JSON/pretty) |
-| Testing | cargo test + tower-http for integration |
-| Build | cargo + musl static linking |
+[![Rust: 2024](https://img.shields.io/badge/Rust-2024%20Stable-red.svg?logo=rust)](https://www.rust-lang.org/)
+[![Axum: 0.8](https://img.shields.io/badge/Axum-v0.8-orange.svg?logo=tower)](https://axum.rs/)
+[![SQLite: WAL](https://img.shields.io/badge/SQLite-WAL%20Mode-003B57.svg?logo=sqlite)](https://sqlite.org/wal.html)
+[![Version: v0.2.0](https://img.shields.io/badge/release-v0.2.0-blue.svg)](https://github.com/Schnee111/aether-relay/releases)
 
 ---
 
-## Why AetherRelay?
+## Overview
 
-Connecting third-party webhooks (Stripe, GitHub, Midtrans, Discord) directly to your backend introduces severe reliability hazards:
+AetherRelay acts as a resilient buffer between external webhook providers (GitHub, Stripe, Midtrans, Discord) and downstream application services. 
 
-- **Retry Storms & Double Execution** — Aggressive provider retries during slow network conditions cause duplicate processing without atomic idempotency guards.
-- **Downstream Outages & Data Loss** — Temporary database locks or deployment restarts cause webhooks to fail and be permanently lost.
-- **Cryptographic Vulnerabilities** — Native string equality comparisons leak timing signals, exposing HMAC verification to byte-by-byte attack.
-- **Cascading Service Failures** — Hammering a struggling internal service without backoff or circuit breaking worsens degradation.
+Routing incoming webhooks directly to backend application endpoints introduces failure modes during downstream restarts, database locks, or unexpected traffic bursts. AetherRelay addresses this by:
 
-**AetherRelay** sits as a lightweight shock absorber in front of your infrastructure:
-
-- Ingests incoming payloads in **< 10ms** returning `HTTP 202 Accepted`.
-- Captures raw stream bytes for **constant-time cryptographic verification** (HMAC-SHA256, SHA-512, Ed25519).
-- Atomically deduplicates replayed webhooks via SQLite compare-and-swap transactions, so a provider retry is never persisted twice.
-- Retries downstream delivery with **Decorrelated Jitter Exponential Backoff** and isolates poisoned events into a forensic **Dead-Letter Queue (DLQ)**.
+1. Ingesting incoming payloads immediately with `HTTP 202 Accepted`.
+2. Verifying provider cryptographic signatures in constant time.
+3. Persisting events into an embedded SQLite database in WAL mode with atomic deduplication.
+4. Delivering payloads to downstream endpoints via background workers with jittered backoff, circuit breaking, and dead-letter queues.
 
 ---
 
@@ -62,13 +39,13 @@ flowchart TD
 
     subgraph IL["Ingestion Layer"]
         direction LR
-        RH["Axum Raw Body\nBytes Extraction"] --> SV["Signature\nVerification"]
-        SV --> IG["Idempotency Guard\nBEGIN IMMEDIATE + CAS"]
+        RH["Raw Body Bytes\nExtraction"] --> SV["Signature\nVerification"]
+        SV --> IG["Idempotency Guard\nAtomic Deduplication"]
     end
 
     IL -->|"202 Accepted"| DB
 
-    subgraph DB["SQLite WAL Storage Engine"]
+    subgraph DB["SQLite WAL Storage"]
         direction LR
         EP["endpoints"] --> IE["incoming_events"]
         IE --> DA["delivery_attempts"]
@@ -79,13 +56,13 @@ flowchart TD
 
     subgraph DW["Dispatch Worker Engine"]
         direction LR
-        JB["Decorrelated Jitter\nBackoff"] --> CB["Circuit Breaker\nCLOSED / OPEN / HALF-OPEN"]
-        CB --> DQ["DLQ Eviction\n& Replay API"]
+        JB["Decorrelated Jitter\nBackoff"] --> CB["Circuit Breaker\nState Machine"]
+        CB --> DQ["DLQ Management\n& Replay"]
     end
 
     DW -->|"HTTP POST"| DS["Downstream Services"]
 
-    OB["Observability\n/health · tracing"]
+    OB["Observability\n/health · /metrics · tracing"]
     IL -.-> OB
     DW -.-> OB
 ```
@@ -94,50 +71,38 @@ flowchart TD
 
 ## Features
 
-**Ingestion**
-- Zero-copy raw body extraction via `axum::body::Bytes` preserves byte-exact payload for HMAC verification while parsing JSON in a single pass.
-
-**Cryptographic Verification**
-- Multi-provider signature adapters: GitHub (HMAC-SHA256), Stripe (v1 timestamped with 300s replay window), Midtrans (SHA-512), Discord (Ed25519), and Generic HMAC.
-- Constant-time comparison via `hmac::Mac::verify_slice()` and `ed25519_dalek::verify_strict()` prevents timing attacks.
-
-**Atomic Persistence**
-- Embedded SQLite WAL mode with `PRAGMA synchronous = NORMAL`, `busy_timeout = 5000ms`, memory-mapped I/O (256 MB).
-- Compare-And-Swap idempotency engine using SQLite transactions guarantees a replayed webhook is accepted once. Downstream delivery is **at-least-once**: if the process dies after the POST lands but before the attempt is recorded, the event is delivered again — consumers must stay idempotent.
-
-**Resilient Dispatch**
-- AWS-style decorrelated jitter backoff (`sleep = min(cap, random(base..prev*3))`) for retry scheduling.
-- Per-endpoint circuit breaker state machine (CLOSED → OPEN → HALF-OPEN) with configurable thresholds.
-- Forensic dead-letter queue with replay capability for poisoned event recovery.
-
-**Observability**
-- Structured JSON logging via `tracing-subscriber` with span-based request tracking.
-- Health endpoint (`GET /health`) returning status, version, and server timestamp.
-- Prometheus metrics at `GET /metrics` (enable via `[metrics] enabled = true`): ingest counts and latency histograms per endpoint/provider, dispatch attempt outcomes, SQLite write errors, HTTP request totals. Returns `404` when disabled.
+- **Zero-Copy Ingestion**: Raw body byte extraction preserves exact payloads for constant-time HMAC and Ed25519 cryptographic verification.
+- **Provider Adapters**: Built-in verification for GitHub (HMAC-SHA256), Stripe (v1 timestamped with replay window check), Midtrans (SHA-512), Discord (Ed25519), and generic HMAC.
+- **Atomic Deduplication**: Events are deduplicated on arrival by `(endpoint_id, idempotency_key)`. Replayed requests return the original event ID without creating duplicate deliveries.
+- **Reliable Dispatch**: Downstream delivery runs as an asynchronous background loop using AWS decorrelated jitter exponential backoff.
+- **Circuit Breaker**: Per-endpoint circuit breakers (Closed / Open / Half-Open) protect degraded downstream endpoints from cascading failure.
+- **Dead-Letter Queue (DLQ)**: Failed events exceeding max retry attempts are isolated into a DLQ for forensic inspection and manual or automated replay.
+- **Observability**: Structured JSON logging, `/health` endpoint, and optional Prometheus metrics exporter on `/metrics`.
 
 ---
 
-## Performance Targets
+## Benchmarks & Performance
 
-| Metric | Target |
-| :--- | :--- |
-| Ingestion throughput | ≥ 10,000 req/s sustained |
-| Ingestion p99 latency | ≤ 5 ms |
-| SQLite write throughput | ≥ 25,000 tx/s |
-| Memory (RSS) under load | ≤ 20 MB |
-| Cold start to listening | ≤ 50 ms |
-| Binary size (musl) | ≤ 10 MB |
-| Docker image size | ≤ 20 MB |
+Measured on a 2-vCPU Linux machine (release build with static musl linking and Prometheus metrics enabled):
+
+| Metric / Scenario | Observed Result | Target |
+| :--- | :--- | :--- |
+| **Cold Start Latency** | 10.61 ms (p50 across 10 trials) | ≤ 50 ms |
+| **Ingestion Throughput** | 2,147.0 req/s (concurrency 20) | High-load burst |
+| **Latency (p99)** | 41.03 ms under load | Sub-100 ms |
+| **Memory Footprint (RSS)** | 13.36 MB peak (60s continuous load) | ≤ 20 MB |
+| **Crash Durability** | Zero event loss across `kill -9` restarts | 100% durability |
+| **Static Binary Size** | 10.61 MB (`x86_64-unknown-linux-musl`) | Compact deployment |
+| **Docker Image Size** | 9.70 MB (`scratch` runtime base) | ≤ 20 MB |
 
 ---
 
 ## Quickstart
 
-### Prerequisites
-- Rust toolchain (stable, 2024 edition): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Docker (for containerized deployment): any modern version supporting scratch images
-
 ### Build from Source
+
+Requirements: Rust toolchain (stable, 2024 edition).
+
 ```bash
 git clone https://github.com/Schnee111/aether-relay.git
 cd aether-relay
@@ -146,135 +111,126 @@ cd aether-relay
 cargo test
 
 # Build release binary
-cargo build --release --target x86_64-unknown-linux-musl
+cargo build --release
 
 # Run locally
-./target/x86_64-unknown-linux-musl/release/aether-relay
+./target/release/aether-relay
 ```
 
 ### Docker Deployment
-The image runs unprivileged as uid `65534` and keeps its SQLite database in the
-`/app/data` volume. The host directory you bind must be owned by that uid, or
-the gateway cannot create its database:
+
+AetherRelay builds as a minimal static binary running in a `scratch` container image:
 
 ```bash
 docker build -t aether-relay:latest .
+
+# Create data directory with permissions for unprivileged user (uid 65534)
 mkdir -p ./data && sudo chown -R 65534:65534 ./data
-docker run -p 3000:3000 -v "$PWD/data:/app/data" aether-relay:latest
+
+docker run -d \
+  -p 3000:3000 \
+  -v "$PWD/data:/app/data" \
+  --name aether-relay \
+  aether-relay:latest
 ```
 
-Without a bind mount the volume is anonymous, so the database is lost when the
-container is removed.
-
 ### Configuration
-Environment variable overrides take precedence over `config/default.toml`:
+
+Configuration can be supplied via `config/default.toml` or overridden using environment variables:
+
 ```bash
 export RELAY__SERVER__HOST="0.0.0.0"
 export RELAY__SERVER__PORT=3000
-export RELAY__DATABASE__PATH="./aether-relay.db"
-export RELAY__AUTH__API_KEYS="your-secret-key-here"
+export RELAY__DATABASE__PATH="./data/aether-relay.db"
+export RELAY__AUTH__API_KEYS="your-admin-api-key"
+export RELAY__METRICS__ENABLED="true"
 ```
 
 ---
 
 ## API Reference
 
-### Register Endpoint
+### 1. Register Endpoint
 ```bash
 curl -X POST http://localhost:3000/v1/endpoints \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: your-secret-key-here" \
+  -H "X-Api-Key: your-admin-api-key" \
   -d '{
     "name": "GitHub Production",
     "provider": "github",
-    "secret": "gh_webhook_secret",
-    "target_url": "https://internal.example.com/hook"
+    "secret": "your_webhook_secret",
+    "target_url": "https://api.internal.net/webhooks/github"
   }'
 ```
 
-Responds `201 Created` with the new endpoint id (when `auth.api_keys` is
-non-empty, `X-Api-Key` is required):
-
+Returns `201 Created` with the registered endpoint ID:
 ```json
-{ "id": "9f1c2a7e-...", "name": "GitHub Production", "provider": "github", "target_url": "https://internal.example.com/hook" }
+{
+  "id": "ep_01j9...",
+  "name": "GitHub Production",
+  "provider": "github",
+  "target_url": "https://api.internal.net/webhooks/github"
+}
 ```
 
-`provider` must be one of `github`, `stripe`, `midtrans`, `discord`, `generic`;
-an unknown value is rejected with `400`. `target_url` must be an `http`/`https`
-URL pointing at a reachable host — loopback, link-local and unspecified
-addresses are rejected to prevent the gateway being used as an SSRF probe.
-
-### Ingest Webhook
+### 2. Ingest Webhook
 ```bash
 curl -X POST http://localhost:3000/v1/ingest/{endpoint_id} \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: unique-request-id" \
-  -H "X-Hub-Signature-256: sha256=<signature>" \
+  -H "Idempotency-Key: evt_unique_12345" \
+  -H "X-Hub-Signature-256: sha256=..." \
   -d '{"event":"push","ref":"refs/heads/main"}'
 ```
 
-`Idempotency-Key` is **required**: omitting it returns `400 BAD_REQUEST`, not
-`500`. Replaying the same key for the same endpoint returns the original event
-id instead of creating a second delivery. `X-Hub-Signature-256` is required for
-`github` endpoints and must be computed over the **raw request body**.
-
-### View Dead-Letter Queue
-```bash
-curl http://localhost:3000/v1/dlq
+Returns `202 Accepted`:
+```json
+{
+  "status": "accepted",
+  "event_id": "01j9...",
+  "idempotency_key": "evt_unique_12345"
+}
 ```
 
-### Replay Failed Event
+### 3. Dead-Letter Queue (DLQ)
 ```bash
+# List DLQ items
+curl http://localhost:3000/v1/dlq \
+  -H "X-Api-Key: your-admin-api-key"
+
+# Replay a failed event back to pending queue
 curl -X POST http://localhost:3000/v1/dlq/{dlq_id}/replay \
-  -H "X-Api-Key: your-secret-key-here"
+  -H "X-Api-Key: your-admin-api-key"
 ```
 
-Replay clears the event's prior delivery attempts, so the event returns to
-`RECEIVED` with its full retry budget restored.
+### 4. Health & Metrics
+```bash
+# Health check
+curl http://localhost:3000/health
+
+# Prometheus metrics (when metrics.enabled = true)
+curl http://localhost:3000/metrics
+```
 
 ---
 
-## Empirical Benchmarks (Hardening Crucible)
+## Development
 
-All benchmarks are independently reproducible via `scripts/crucible_driver.py` (Wave 1) and `scripts/crucible_wave3.py` (Wave 3) running against the native musl release binary:
+```bash
+# Run unit and integration tests
+cargo test
 
-| Benchmark / Scenario | Target Specification | Empirical Result | Status |
-| :--- | :--- | :--- | :--- |
-| **Cold Start Latency** | ≤ 50 ms | **10.61 ms** (p50 across 10 trials) | **PASS** |
-| **Ingestion Throughput** | High-load burst | **2,147.0 req/s** (C=20, p99 = 41.03 ms) | **PASS** |
-| **Memory Soak (60s)** | RSS ≤ 20 MB, zero leak | **Peak 13.36 MB**, +1.01 MB drift | **PASS** |
-| **Crash Durability (kill -9)** | Zero data loss on restart | **10/10 survived**, integrity ok | **PASS** |
-| **Concurrent Race Guard** | 1 row per idempotency key | **1× 202, 49× 409**, 1 row stored | **PASS** |
-| **Binary & Container Size** | Bin ≤ 10 MB, Image ≤ 20 MB | **10.61 MB** binary, **9.70 MB** image | **PASS** |
-| **Dependency Security** | Zero known vulnerabilities | **0 advisories** in 292 crates | **PASS** |
+# Format checking
+cargo fmt --check
 
-See detailed reports in [docs/rust/crucible_wave1_report.md](docs/rust/crucible_wave1_report.md) and [docs/rust/crucible_wave3_report.md](docs/rust/crucible_wave3_report.md).
+# Linter and static analysis
+cargo clippy --all-targets -- -D warnings
 
----
-
-## Quality Gates
-
-This project enforces strict engineering standards:
-- **Clippy**: `cargo clippy -- -D warnings` must pass with zero warnings.
-- **Format**: `cargo fmt --check` enforced in CI.
-- **Testing**: All unit and integration tests must pass.
-- **Security**: `cargo audit` scans dependencies for known vulnerabilities.
-- **Reviews**: PRs reviewed via Shorekeeper Sentinel before merge.
-
----
-
-## Contributing
-
-See [SPEC.md](docs/rust/SPEC.md) for technical architecture details and [TEST_CRUCIBLE.md](docs/rust/TEST_CRUCIBLE.md) for the 20 mandatory verification scenarios.
-
-All contributions follow the development workflow defined in [GATES.md](docs/rust/GATES.md) (Definition of Ready / Definition of Done) pipeline: DEFINE → PLAN → BUILD → VERIFY → POLISH → REVIEW → SHIP.
+# Security audit
+cargo audit
+```
 
 ---
 
 ## License
 
-MIT License — see LICENSE file for details.
-
----
-
-Built by Schnee & Shorekeeper 🚀
+MIT License — see [LICENSE](LICENSE) for details.
