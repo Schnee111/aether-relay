@@ -1,0 +1,112 @@
+# Fail fast if the image cannot actually start. The previous Dockerfile built
+# a scratch image with no WORKDIR, so `docker run` died immediately on a
+# permission error that nothing in CI ever exercised.
+name: Container Smoke Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'config/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/container.yml'
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'config/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/container.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: Build & run container
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: aether-relay:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image runs unprivileged from the expected workdir
+        run: |
+          set -eu
+          workdir=$(docker inspect -f '{{.Config.WorkingDir}}' aether-relay:smoke)
+          user=$(docker inspect -f '{{.Config.User}}' aether-relay:smoke)
+          test "$workdir" = "/app" || { echo "::error::unexpected WORKDIR '$workdir'"; exit 1; }
+          test "$user" = "65534:65534" || { echo "::error::unexpected USER '$user'"; exit 1; }
+          echo "WORKDIR=$workdir USER=$user"
+
+      - name: Container starts and serves /health
+        run: |
+          set -eu
+          docker run -d --name relay-smoke -p 3000:3000 aether-relay:smoke
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/health >/dev/null 2>&1; then
+              echo "healthy after ${i}s"
+              curl -fsS http://127.0.0.1:3000/health
+              docker rm -f relay-smoke
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' relay-smoke 2>/dev/null || echo false)" != "true" ]; then
+              echo "::error::container exited during startup"
+              docker logs relay-smoke || true
+              docker rm -f relay-smoke
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "::error::container did not become healthy within 30s"
+          docker logs relay-smoke || true
+          docker rm -f relay-smoke
+          exit 1
+
+      - name: Unprivileged user can write its database into the volume
+        run: |
+          set -eu
+          # A scratch image has no shell, so the check runs on the host: mount a
+          # directory owned by uid 65534 and assert the gateway creates its
+          # SQLite file there. This is the exact failure the old image had.
+          mkdir -p /tmp/relay-data
+          sudo chown 65534:65534 /tmp/relay-data
+
+          docker run -d --name relay-vol -p 3001:3000 \
+            -v /tmp/relay-data:/app/data aether-relay:smoke
+
+          for i in $(seq 1 30); do
+            if [ -f /tmp/relay-data/aether-relay.db ]; then
+              echo "database created in the mounted volume after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          if [ ! -f /tmp/relay-data/aether-relay.db ]; then
+            echo "::error::database was not created in the volume"
+            docker logs relay-vol || true
+            docker rm -f relay-vol
+            exit 1
+          fi
+
+          ls -la /tmp/relay-data
+          docker rm -f relay-vol

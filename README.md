@@ -1,7 +1,7 @@
 # AetherRelay
 
 > **High-Performance Webhook Ingestion & Reliable Dispatch Gateway**  
-> *A crash-resilient, exactly-once webhook shock-absorber built with Axum and embedded SQLite WAL.*
+> *A crash-resilient, at-least-once webhook shock-absorber with ingest-time deduplication, built with Axum and embedded SQLite WAL.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust: Stable](https://img.shields.io/badge/Rust-stable-red.svg?logo=rust)](https://www.rust-lang.org/)
@@ -9,7 +9,7 @@
 [![SQLite WAL](https://img.shields.io/badge/SQLite-WAL%20Mode-003B57.svg?logo=sqlite)](https://sqlite.org/wal.html)
 [![rusqlite](https://img.shields.io/badge/rusqlite-Synchronous-blue.svg)](https://docs.rs/rusqlite/)
 [![tokio](https://img.shields.io/badge/tokio-Async-dc6fff.svg?logo=tokio)](https://tokio.rs/)
-[![tests](https://img.shields.io/badge/test-17-green.svg)](https://github.com/Schnee111/aether-relay/actions)
+[![tests](https://github.com/Schnee111/aether-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/Schnee111/aether-relay/actions/workflows/ci.yml)
 [![audit](https://img.shields.io/badge/cargo--audit-clean-brightgreen.svg)](https://rustsec.org/advisories/)
 [![bin: <10MB](https://img.shields.io/badge/bin-size-%3C10MB-brightgreen.svg)](https://github.com/Schnee111/aether-relay/releases)
 
@@ -30,7 +30,7 @@
 
 ## Why AetherRelay?
 
-Connecting third-party webhooks (Stripe, GitHub, Midtrans, Discord, Shopify) directly to your backend introduces severe reliability hazards:
+Connecting third-party webhooks (Stripe, GitHub, Midtrans, Discord) directly to your backend introduces severe reliability hazards:
 
 - **Retry Storms & Double Execution** — Aggressive provider retries during slow network conditions cause duplicate processing without atomic idempotency guards.
 - **Downstream Outages & Data Loss** — Temporary database locks or deployment restarts cause webhooks to fail and be permanently lost.
@@ -41,7 +41,7 @@ Connecting third-party webhooks (Stripe, GitHub, Midtrans, Discord, Shopify) dir
 
 - Ingests incoming payloads in **< 10ms** returning `HTTP 202 Accepted`.
 - Captures raw stream bytes for **constant-time cryptographic verification** (HMAC-SHA256, SHA-512, Ed25519).
-- Locks events atomically using SQLite `BEGIN IMMEDIATE` to guarantee **zero double-dispatch**.
+- Atomically deduplicates replayed webhooks via SQLite compare-and-swap transactions, so a provider retry is never persisted twice.
 - Retries downstream delivery with **Decorrelated Jitter Exponential Backoff** and isolates poisoned events into a forensic **Dead-Letter Queue (DLQ)**.
 
 ---
@@ -103,7 +103,7 @@ flowchart TD
 
 **Atomic Persistence**
 - Embedded SQLite WAL mode with `PRAGMA synchronous = NORMAL`, `busy_timeout = 5000ms`, memory-mapped I/O (256 MB).
-- Compare-And-Swap idempotency engine using `BEGIN IMMEDIATE` transactions guarantees exactly-once delivery.
+- Compare-And-Swap idempotency engine using SQLite transactions guarantees a replayed webhook is accepted once. Downstream delivery is **at-least-once**: if the process dies after the POST lands but before the attempt is recorded, the event is delivered again — consumers must stay idempotent.
 
 **Resilient Dispatch**
 - AWS-style decorrelated jitter backoff (`sleep = min(cap, random(base..prev*3))`) for retry scheduling.
@@ -112,7 +112,7 @@ flowchart TD
 
 **Observability**
 - Structured JSON logging via `tracing-subscriber` with span-based request tracking.
-- Health endpoint (`GET /health`) returning status, version, and uptime.
+- Health endpoint (`GET /health`) returning status, version, and server timestamp.
 
 > **Note:** A Prometheus `/metrics` endpoint is *planned but not implemented* in v0.2.0. Do not scrape it.
 
@@ -154,10 +154,18 @@ cargo build --release --target x86_64-unknown-linux-musl
 ```
 
 ### Docker Deployment
+The image runs unprivileged as uid `65534` and keeps its SQLite database in the
+`/app/data` volume. The host directory you bind must be owned by that uid, or
+the gateway cannot create its database:
+
 ```bash
 docker build -t aether-relay:latest .
-docker run -p 3000:3000 -v ./data:/app/data aether-relay:latest
+mkdir -p ./data && sudo chown -R 65534:65534 ./data
+docker run -p 3000:3000 -v "$PWD/data:/app/data" aether-relay:latest
 ```
+
+Without a bind mount the volume is anonymous, so the database is lost when the
+container is removed.
 
 ### Configuration
 Environment variable overrides take precedence over `config/default.toml`:
@@ -176,7 +184,7 @@ export RELAY__AUTH__API_KEYS="your-secret-key-here"
 ```bash
 curl -X POST http://localhost:3000/v1/endpoints \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: your-secret" \
+  -H "X-Api-Key: your-secret-key-here" \
   -d '{
     "name": "GitHub Production",
     "provider": "github",
@@ -184,6 +192,18 @@ curl -X POST http://localhost:3000/v1/endpoints \
     "target_url": "https://internal.example.com/hook"
   }'
 ```
+
+Responds `201 Created` with the new endpoint id (when `auth.api_keys` is
+non-empty, `X-Api-Key` is required):
+
+```json
+{ "id": "9f1c2a7e-...", "name": "GitHub Production", "provider": "github", "target_url": "https://internal.example.com/hook" }
+```
+
+`provider` must be one of `github`, `stripe`, `midtrans`, `discord`, `generic`;
+an unknown value is rejected with `400`. `target_url` must be an `http`/`https`
+URL pointing at a reachable host — loopback, link-local and unspecified
+addresses are rejected to prevent the gateway being used as an SSRF probe.
 
 ### Ingest Webhook
 ```bash
@@ -194,6 +214,11 @@ curl -X POST http://localhost:3000/v1/ingest/{endpoint_id} \
   -d '{"event":"push","ref":"refs/heads/main"}'
 ```
 
+`Idempotency-Key` is **required**: omitting it returns `400 BAD_REQUEST`, not
+`500`. Replaying the same key for the same endpoint returns the original event
+id instead of creating a second delivery. `X-Hub-Signature-256` is required for
+`github` endpoints and must be computed over the **raw request body**.
+
 ### View Dead-Letter Queue
 ```bash
 curl http://localhost:3000/v1/dlq
@@ -202,8 +227,11 @@ curl http://localhost:3000/v1/dlq
 ### Replay Failed Event
 ```bash
 curl -X POST http://localhost:3000/v1/dlq/{dlq_id}/replay \
-  -H "X-Api-Key: your-secret"
+  -H "X-Api-Key: your-secret-key-here"
 ```
+
+Replay clears the event's prior delivery attempts, so the event returns to
+`RECEIVED` with its full retry budget restored.
 
 ---
 
@@ -222,7 +250,7 @@ This project enforces strict engineering standards:
 
 See [SPEC.md](docs/rust/SPEC.md) for technical architecture details and [TEST_CRUCIBLE.md](docs/rust/TEST_CRUCIBLE.md) for the 20 mandatory verification scenarios.
 
-All contributions follow the [Development Workflow](.hermes/SKILL.md) pipeline: DEFINE → PLAN → BUILD → VERIFY → POLISH → REVIEW → SHIP.
+All contributions follow the development workflow defined in [GATES.md](docs/rust/GATES.md) (Definition of Ready / Definition of Done) pipeline: DEFINE → PLAN → BUILD → VERIFY → POLISH → REVIEW → SHIP.
 
 ---
 
