@@ -1,4 +1,4 @@
-use aether_relay::{api, config};
+use aether_relay::{AppState, api, config, db};
 use std::net::SocketAddr;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -27,7 +27,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Initializing AetherRelay gateway"
     );
 
-    let app = api::create_router();
+    let pool = db::create_pool(
+        &app_config.database.path,
+        app_config.database.pool_size,
+        app_config.database.busy_timeout_ms,
+        app_config.database.mmap_size,
+        app_config.database.cache_size,
+    )?;
+
+    let state = AppState {
+        pool,
+        config: app_config.clone(),
+    };
+
+    let app = api::create_router(state);
 
     let addr: SocketAddr =
         format!("{}:{}", app_config.server.host, app_config.server.port).parse()?;
