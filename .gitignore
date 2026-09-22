@@ -9,3 +9,5 @@ data/*.db-shm
 *.log
 coverage
 .DS_Store
+/target
+

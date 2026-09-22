@@ -1,0 +1,29 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+body_limit_bytes = 1048576
+
+[database]
+path = "./data/aether-relay.db"
+busy_timeout_ms = 5000
+mmap_size = 268435456
+cache_size = -64000
+pool_size = 4
+
+[auth]
+api_keys = []
+
+[worker]
+poll_interval_ms = 100
+max_attempts = 5
+backoff_base_ms = 1000
+backoff_cap_ms = 60000
+circuit_failure_threshold = 5
+circuit_recovery_timeout_secs = 30
+
+[logging]
+level = "info"
+format = "json"
+
+[metrics]
+enabled = true
