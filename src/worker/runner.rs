@@ -108,6 +108,12 @@ pub async fn run_dispatch_once(
     )
     .await;
 
+    let outcome_label = match &outcome {
+        Ok(_) => "success",
+        Err(_) => "failure",
+    };
+    crate::api::middleware::metrics::record_dispatch_metrics(&event_id, outcome_label);
+
     match outcome {
         Ok(result) if result.deferred => Ok(DispatchOutcome::Deferred),
         Ok(_) => Ok(DispatchOutcome::Settled),

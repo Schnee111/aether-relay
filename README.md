@@ -113,8 +113,7 @@ flowchart TD
 **Observability**
 - Structured JSON logging via `tracing-subscriber` with span-based request tracking.
 - Health endpoint (`GET /health`) returning status, version, and server timestamp.
-
-> **Note:** A Prometheus `/metrics` endpoint is *planned but not implemented* in v0.2.0. Do not scrape it.
+- Prometheus metrics at `GET /metrics` (enable via `[metrics] enabled = true`): ingest counts and latency histograms per endpoint/provider, dispatch attempt outcomes, SQLite write errors, HTTP request totals. Returns `404` when disabled.
 
 ---
 
