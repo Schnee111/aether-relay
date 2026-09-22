@@ -14,23 +14,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v4
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 22
+          components: clippy, rustfmt
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
-      - name: Install dependencies
-        run: |
-          pnpm install
-          pnpm approve-builds --all
+      - name: Check Formatting
+        run: cargo fmt --check
 
-      - name: Static Type Check
-        run: pnpm build
+      - name: Static Analysis (Clippy)
+        run: cargo clippy -- -D warnings
 
       - name: Run Test Suite
-        run: pnpm test
+        run: cargo test
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Security Audit
+        run: cargo audit

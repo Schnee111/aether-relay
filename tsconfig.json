@@ -4,14 +4,14 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
-    "outDir": "./dist",
-    "rootDir": "./src",
+    "outDir": "./legacy/ts/dist",
+    "rootDir": "./legacy/ts",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests", "scripts"]
+  "include": ["legacy/ts/**/*"],
+  "exclude": ["node_modules", "dist", "legacy/ts/dist", "legacy/ts/tests", "legacy/ts/scripts"]
 }
