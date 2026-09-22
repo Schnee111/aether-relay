@@ -1,4 +1,5 @@
 use crate::api::middleware::auth::verify_api_key;
+use crate::api::middleware::metrics::record_ingest_metrics;
 use crate::core::idempotency::accept_event;
 use crate::crypto::{Provider, verify_signature};
 use crate::db::models::EndpointRecord;
@@ -8,10 +9,11 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use rusqlite::params;
 use serde_json::json;
 use std::str::FromStr;
+use std::time::Instant;
 
 /// Bounded so an oversized key cannot be persisted into the idempotency index.
 const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
@@ -21,12 +23,46 @@ pub async fn handle_ingest(
     Path(endpoint_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<impl IntoResponse, AppError> {
+) -> Response {
+    let start = Instant::now();
+    let result = handle_ingest_inner(&state, &endpoint_id, &headers, &body).await;
+    let latency_secs = start.elapsed().as_secs_f64();
+
+    match &result {
+        Ok((provider, status_code, _)) => {
+            record_ingest_metrics(&endpoint_id, provider, status_code.as_u16(), latency_secs);
+        }
+        Err(err) => {
+            let status_code = err.status_code();
+            record_ingest_metrics(&endpoint_id, "unknown", status_code.as_u16(), latency_secs);
+        }
+    }
+
+    let (_provider, status, event_id) = match result {
+        Ok(triple) => triple,
+        Err(err) => return err.into_response(),
+    };
+    (
+        status,
+        Json(json!({
+            "id": event_id,
+            "status": "RECEIVED"
+        })),
+    )
+        .into_response()
+}
+
+async fn handle_ingest_inner(
+    state: &AppState,
+    endpoint_id: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(String, StatusCode, String), AppError> {
     if body.len() > state.config.server.body_limit_bytes {
         return Err(AppError::PayloadTooLarge);
     }
 
-    verify_api_key(&headers, &state.config.auth.api_keys)?;
+    verify_api_key(headers, &state.config.auth.api_keys)?;
 
     // This header is a required part of the contract, not optional metadata.
     // Answering 500 for a missing client header told the caller the server had
@@ -43,9 +79,12 @@ pub async fn handle_ingest(
         .to_string();
 
     let pool = state.pool.clone();
-    let ep_id = endpoint_id.clone();
+    let ep_id = endpoint_id.to_string();
     let endpoint = tokio::task::spawn_blocking(move || -> Result<EndpointRecord, AppError> {
-        let conn = pool.get().map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = pool.get().map_err(|e| {
+            metrics::counter!("aether_sqlite_write_errors_total").increment(1);
+            AppError::Database(e.to_string())
+        })?;
         conn.query_row(
             "SELECT id, name, provider, secret, target_url, created_at FROM endpoints WHERE id = ?1",
             params![ep_id],
@@ -64,14 +103,18 @@ pub async fn handle_ingest(
             rusqlite::Error::QueryReturnedNoRows => {
                 AppError::NotFound(format!("Endpoint {ep_id} not found"))
             }
-            other => AppError::Database(other.to_string()),
+            other => {
+                metrics::counter!("aether_sqlite_write_errors_total").increment(1);
+                AppError::Database(other.to_string())
+            }
         })
     })
     .await
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
+    let provider_str = endpoint.provider.clone();
     let provider = Provider::from_str(&endpoint.provider)?;
-    verify_signature(provider, &endpoint.secret, &body, &headers)?;
+    verify_signature(provider, &endpoint.secret, body, headers)?;
 
     let mut header_map = serde_json::Map::new();
     for (name, val) in headers.iter() {
@@ -83,11 +126,15 @@ pub async fn handle_ingest(
 
     let pool = state.pool.clone();
     let body_vec = body.to_vec();
+    let ep_id_for_accept = endpoint_id.to_string();
     let event_id = tokio::task::spawn_blocking(move || -> Result<String, AppError> {
-        let mut conn = pool.get().map_err(|e| AppError::Database(e.to_string()))?;
+        let mut conn = pool.get().map_err(|e| {
+            metrics::counter!("aether_sqlite_write_errors_total").increment(1);
+            AppError::Database(e.to_string())
+        })?;
         accept_event(
             &mut conn,
-            &endpoint_id,
+            &ep_id_for_accept,
             &idempotency_key,
             &body_vec,
             &headers_json,
@@ -96,11 +143,5 @@ pub async fn handle_ingest(
     .await
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "id": event_id,
-            "status": "RECEIVED"
-        })),
-    ))
+    Ok((provider_str, StatusCode::ACCEPTED, event_id))
 }

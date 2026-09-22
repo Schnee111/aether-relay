@@ -62,6 +62,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         worker_cfg,
     ));
 
+    // Prometheus exposition: only install the exporter when metrics are
+    // enabled, so a disabled instance exposes no scrape target at all.
+    if app_config.metrics.enabled {
+        api::middleware::metrics::install_prometheus_exporter();
+    }
+
     let state = AppState {
         pool,
         config: app_config.clone(),
