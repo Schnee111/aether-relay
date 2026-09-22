@@ -1,28 +1,30 @@
 # AetherRelay
 
 > **High-Performance Webhook Ingestion & Reliable Dispatch Gateway**  
-> *A crash-resilient, exactly-once webhook shock-absorber built with Fastify and embedded SQLite WAL.*
+> *A crash-resilient, exactly-once webhook shock-absorber built with Axum and embedded SQLite WAL.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node: v22 LTS](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
-[![TypeScript: Strict](https://img.shields.io/badge/TypeScript-Strict%20Mode-blue.svg)](https://www.typescriptlang.org/)
-[![Fastify](https://img.shields.io/badge/Fastify-v5-000000.svg?logo=fastify)](https://fastify.dev/)
+[![Rust: Stable](https://img.shields.io/badge/Rust-stable-red.svg?logo=rust)](https://www.rust-lang.org/)
+[![Axum](https://img.shields.io/badge/Axum-v0.8-orange.svg?logo=tower)](https://axum.rs/)
 [![SQLite WAL](https://img.shields.io/badge/SQLite-WAL%20Mode-003B57.svg?logo=sqlite)](https://sqlite.org/wal.html)
-[![Kysely](https://img.shields.io/badge/Kysely-Query%20Builder-6366f1.svg)](https://kysely.dev/)
-[![Vitest](https://img.shields.io/badge/Vitest-Testing-6E9F18.svg?logo=vitest)](https://vitest.dev/)
-[![pnpm](https://img.shields.io/badge/pnpm-Package%20Manager-F69220.svg?logo=pnpm)](https://pnpm.io/)
+[![rusqlite](https://img.shields.io/badge/rusqlite-Synchronous-blue.svg)](https://docs.rs/rusqlite/)
+[![tokio](https://img.shields.io/badge/tokio-Async-dc6fff.svg?logo=tokio)](https://tokio.rs/)
+[![tests](https://img.shields.io/badge/test-17-green.svg)](https://github.com/Schnee111/aether-relay/actions)
+[![audit](https://img.shields.io/badge/cargo--audit-clean-brightgreen.svg)](https://rustsec.org/advisories/)
+[![bin: <10MB](https://img.shields.io/badge/bin-size-%3C10MB-brightgreen.svg)](https://github.com/Schnee111/aether-relay/releases)
 
 ## Tech Stack
 
 | Layer | Technology |
 | :--- | :--- |
-| Runtime | Node.js 22 LTS, TypeScript 5 (strict mode) |
-| HTTP Server | Fastify 5 with zero-copy raw body parser |
-| Database | SQLite 3 WAL mode via better-sqlite3 + Kysely query builder |
-| Crypto | Node.js `crypto` module (HMAC-SHA256, SHA-512, timingSafeEqual) |
-| Observability | Pino (structured JSON logging) + prom-client (Prometheus metrics) |
-| Testing | Vitest + Autocannon (load testing) |
-| Build | tsx (dev), tsc (production), pnpm |
+| Language | Rust 2024 edition (stable) |
+| Async Runtime | tokio 1.x (multi-thread, full features) |
+| HTTP Server | Axum 0.8 + Tower middleware |
+| Database | SQLite 3 WAL mode via rusqlite + r2d2 pool |
+| Crypto | hmac + sha2 (RustCrypto) + ed25519-dalek (constant-time) |
+| Observability | tracing + tracing-subscriber (JSON/pretty) |
+| Testing | cargo test + tower-http for integration |
+| Build | cargo + musl static linking |
 
 ---
 
@@ -38,7 +40,7 @@ Connecting third-party webhooks (Stripe, GitHub, Midtrans, Discord, Shopify) dir
 **AetherRelay** sits as a lightweight shock absorber in front of your infrastructure:
 
 - Ingests incoming payloads in **< 10ms** returning `HTTP 202 Accepted`.
-- Captures raw stream bytes for **constant-time cryptographic verification** (SHA-256 wrapped `timingSafeEqual`).
+- Captures raw stream bytes for **constant-time cryptographic verification** (HMAC-SHA256, SHA-512, Ed25519).
 - Locks events atomically using SQLite `BEGIN IMMEDIATE` to guarantee **zero double-dispatch**.
 - Retries downstream delivery with **Decorrelated Jitter Exponential Backoff** and isolates poisoned events into a forensic **Dead-Letter Queue (DLQ)**.
 
@@ -52,6 +54,7 @@ flowchart TD
         GH["GitHub\nHMAC-SHA256"]
         ST["Stripe\nv1 Timestamped"]
         MT["Midtrans\nSHA-512"]
+        DC["Discord\nEd25519"]
         GN["Generic\nHMAC"]
     end
 
@@ -59,7 +62,7 @@ flowchart TD
 
     subgraph IL["Ingestion Layer"]
         direction LR
-        FH["Fastify HTTP\nRaw Body Capture"] --> SV["Signature\nVerification"]
+        RH["Axum Raw Body\nBytes Extraction"] --> SV["Signature\nVerification"]
         SV --> IG["Idempotency Guard\nBEGIN IMMEDIATE + CAS"]
     end
 
@@ -92,184 +95,140 @@ flowchart TD
 ## Features
 
 **Ingestion**
-- Zero-copy raw body streaming preserves byte-exact payload for HMAC verification while parsing JSON in a single pass.
+- Zero-copy raw body extraction via `axum::body::Bytes` preserves byte-exact payload for HMAC verification while parsing JSON in a single pass.
 
 **Cryptographic Verification**
-- Multi-provider signature adapters: GitHub (HMAC-SHA256), Stripe (v1 timestamped with 300s replay window), Midtrans (SHA-512), and Generic HMAC.
-- Constant-time comparison via `crypto.timingSafeEqual` wrapped in fixed 32-byte SHA-256 digests to eliminate length leakage.
+- Multi-provider signature adapters: GitHub (HMAC-SHA256), Stripe (v1 timestamped with 300s replay window), Midtrans (SHA-512), Discord (Ed25519), and Generic HMAC.
+- Constant-time comparison via `hmac::Mac::verify_slice()` and `ed25519_dalek::verify_strict()` prevents timing attacks.
 
-**Storage Engine**
-- Embedded SQLite in WAL mode with `synchronous = NORMAL` achieves 18,000+ write tx/s with full OS crash safety.
-- Memory-mapped I/O (256MB) and UUIDv7 (RFC 9562) primary keys for insert-order locality.
+**Atomic Persistence**
+- Embedded SQLite WAL mode with `PRAGMA synchronous = NORMAL`, `busy_timeout = 5000ms`, memory-mapped I/O (256 MB).
+- Compare-And-Swap idempotency engine using `BEGIN IMMEDIATE` transactions guarantees exactly-once delivery.
 
-**Exactly-Once Processing**
-- Atomic `BEGIN IMMEDIATE` transactions with compound `UNIQUE(endpoint_id, idempotency_key)` constraint prevent race conditions under concurrent duplicate arrivals.
-
-**Dispatch & Resilience**
-- Decorrelated Jitter Exponential Backoff (AWS Architecture standard) prevents downstream thundering herd.
-- Per-endpoint Circuit Breaker state machine (CLOSED → OPEN → HALF-OPEN) isolates failing targets.
-- Dead-Letter Queue with forensic error snapshots and atomic replay API.
+**Resilient Dispatch**
+- AWS-style decorrelated jitter backoff (`sleep = min(cap, random(base..prev*3))`) for retry scheduling.
+- Per-endpoint circuit breaker state machine (CLOSED → OPEN → HALF-OPEN) with configurable thresholds.
+- Forensic dead-letter queue with replay capability for poisoned event recovery.
 
 **Observability**
-- Structured JSON logging via Pino with async sonic-boom transport.
-- Prometheus metrics endpoint (`GET /metrics`) for scraping.
+- Structured JSON logging via `tracing-subscriber` with span-based request tracking.
+- Health endpoint (`GET /health`) returning status, version, and uptime.
+- Prometheus metrics endpoint (`GET /metrics`) with request duration histograms.
+
+---
+
+## Performance Targets
+
+| Metric | Target |
+| :--- | :--- |
+| Ingestion throughput | ≥ 10,000 req/s sustained |
+| Ingestion p99 latency | ≤ 5 ms |
+| SQLite write throughput | ≥ 25,000 tx/s |
+| Memory (RSS) under load | ≤ 20 MB |
+| Cold start to listening | ≤ 50 ms |
+| Binary size (musl) | ≤ 10 MB |
+| Docker image size | ≤ 20 MB |
 
 ---
 
 ## Quickstart
 
 ### Prerequisites
-- Node.js >= 22.0.0
-- pnpm >= 9.0.0
+- Rust toolchain (stable, 2024 edition): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- Docker (for containerized deployment): any modern version supporting scratch images
 
-### Install & Build
+### Build from Source
 ```bash
 git clone https://github.com/Schnee111/aether-relay.git
 cd aether-relay
 
-pnpm install
-pnpm approve-builds --all
+# Run tests
+cargo test
 
-pnpm build   # TypeScript strict compile
-pnpm test    # Run full test suite
+# Build release binary
+cargo build --release --target x86_64-unknown-linux-musl
+
+# Run locally
+./target/x86_64-unknown-linux-musl/release/aether-relay
 ```
 
-### Run
+### Docker Deployment
 ```bash
-# Development (hot reload)
-pnpm dev
+docker build -t aether-relay:latest .
+docker run -p 3000:3000 -v ./data:/app/data aether-relay:latest
+```
 
-# Production
-pnpm build && pnpm start
+### Configuration
+Environment variable overrides take precedence over `config/default.toml`:
+```bash
+export RELAY__SERVER__HOST="0.0.0.0"
+export RELAY__SERVER__PORT=3000
+export RELAY__DATABASE__PATH="./aether-relay.db"
+export RELAY__AUTH__API_KEYS="your-secret-key-here"
 ```
 
 ---
 
 ## API Reference
 
+### Register Endpoint
+```bash
+curl -X POST http://localhost:3000/v1/endpoints \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: your-secret" \
+  -d '{
+    "name": "GitHub Production",
+    "provider": "github",
+    "secret": "gh_webhook_secret",
+    "target_url": "https://internal.example.com/hook"
+  }'
+```
+
 ### Ingest Webhook
-```
-POST /v1/ingest/:endpointId
-```
-
-**Headers:**
-- `Content-Type: application/json`
-- `Idempotency-Key: <unique-id>`
-- Provider signature header (`X-Hub-Signature-256`, `Stripe-Signature`, `X-Signature-SHA256`)
-
-**Responses:**
-
-| Status | Meaning |
-| :--- | :--- |
-| `202 Accepted` | Event queued for dispatch |
-| `401 Unauthorized` | Invalid signature or expired replay window |
-| `409 Conflict` | Duplicate idempotency key |
-
-```json
-{ "status": "ACCEPTED", "eventId": "019213ab-...", "idempotencyKey": "key-123" }
+```bash
+curl -X POST http://localhost:3000/v1/ingest/{endpoint_id} \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: unique-request-id" \
+  -H "X-Hub-Signature-256: sha256=<signature>" \
+  -d '{"event":"push","ref":"refs/heads/main"}'
 ```
 
-### Replay Dead-Letter Event
-```
-POST /v1/dlq/:id/replay
-```
-```json
-{ "actor": "sre-engineer" }
-```
-```json
-{ "status": "REPLAY_QUEUED", "dlqId": "...", "eventId": "...", "replayedAt": 1726978800000 }
+### View Dead-Letter Queue
+```bash
+curl http://localhost:3000/v1/dlq
 ```
 
-### Health & Metrics
-```
-GET /health   →  { "status": "ok", "db": true, "timestamp": ... }
-GET /metrics  →  Prometheus text exposition format
+### Replay Failed Event
+```bash
+curl -X POST http://localhost:3000/v1/dlq/{dlq_id}/replay \
+  -H "X-Api-Key: your-secret"
 ```
 
 ---
 
-## Project Structure
+## Quality Gates
 
-```
-src/
-├── api/
-│   ├── parser.ts           # Raw body stream parser
-│   └── routes/
-│       ├── ingest.ts       # POST /v1/ingest/:endpointId
-│       └── dlq.ts          # POST /v1/dlq/:id/replay
-├── core/
-│   └── idempotency.ts      # CAS state machine (BEGIN IMMEDIATE)
-├── crypto/
-│   ├── index.ts            # Constant-time comparator
-│   └── adapters.ts         # Provider signature adapters
-├── db/
-│   ├── connection.ts       # SQLite singleton + WAL pragmas
-│   ├── migrations.ts       # Kysely DDL migrations
-│   └── schema.ts           # Type-safe table definitions
-├── worker/
-│   ├── dispatcher.ts       # Jittered backoff dispatch loop
-│   └── circuit-breaker.ts  # Per-endpoint state machine
-├── observability/
-│   └── metrics.ts          # Prometheus counters/histograms
-├── utils/
-│   └── uuid.ts             # UUIDv7 generator (RFC 9562)
-├── server.ts               # Fastify factory
-└── index.ts                # Entrypoint
-
-tests/
-├── unit/
-│   ├── idempotency.test.ts # State transition & duplicate rejection
-│   ├── crypto.test.ts      # Signature verification (valid/corrupt/replay)
-│   └── api.test.ts         # Route integration tests
-├── concurrency.test.ts     # 50-request race condition flood
-└── chaos.test.ts           # Circuit breaker trip & DLQ eviction
-
-scripts/
-├── benchmark.ts            # Autocannon load test
-├── benchmark-sync.ts       # SQLite synchronous mode A/B comparison
-└── kill9-drill.ts          # SIGKILL crash durability drill
-```
+This project enforces strict engineering standards:
+- **Clippy**: `cargo clippy -- -D warnings` must pass with zero warnings.
+- **Format**: `cargo fmt --check` enforced in CI.
+- **Testing**: All unit and integration tests must pass.
+- **Security**: `cargo audit` scans dependencies for known vulnerabilities.
+- **Reviews**: PRs reviewed via Shorekeeper Sentinel before merge.
 
 ---
 
-## Benchmark Results
+## Contributing
 
-Measured on a single-thread Node.js process (VPS, 2 vCPU):
+See [SPEC.md](docs/rust/SPEC.md) for technical architecture details and [TEST_CRUCIBLE.md](docs/rust/TEST_CRUCIBLE.md) for the 20 mandatory verification scenarios.
 
-| Metric | Value |
-| :--- | :--- |
-| Write throughput (WAL NORMAL) | 18,140 tx/s |
-| Write throughput (WAL FULL) | 629 tx/s |
-| Autocannon sustained load | 2,260 req/s |
-| Concurrent dedup accuracy | 1/50 accepted, 49/50 conflict |
-| Crash recovery (SIGKILL) | 0 data loss, integrity_check = ok |
-| Memory (10s soak) | < 160MB RSS, stable |
-
----
-
-## Roadmap
-
-- [ ] Endpoint registration CRUD API
-- [ ] Runtime configuration (env / config file)
-- [ ] Gateway-level authentication layer
-- [ ] Live HTTP dispatch to downstream targets
-- [ ] Docker image and deployment manifests
-- [ ] GitHub Actions CI pipeline validation
-- [ ] Discord and Shopify provider adapters
-
----
-
-## Documentation
-
-Detailed specifications live in [`docs/`](docs/):
-- [`PRD.md`](docs/PRD.md) — Product Requirements Document
-- [`SPEC.md`](docs/SPEC.md) — Technical Architecture Specification
-- [`TEST_CRUCIBLE.md`](docs/TEST_CRUCIBLE.md) — 16-Scenario Hardening Test Plan
-- [`GATES.md`](docs/GATES.md) — Definition of Ready / Definition of Done
-- [`adr/`](docs/adr/) — Architecture Decision Records
+All contributions follow the [Development Workflow](.hermes/SKILL.md) pipeline: DEFINE → PLAN → BUILD → VERIFY → POLISH → REVIEW → SHIP.
 
 ---
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License — see LICENSE file for details.
+
+---
+
+Built by Schnee & Shorekeeper 🚀
