@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **observability**: Prometheus `/metrics` endpoint (`metrics-exporter-prometheus`) exposing `aether_webhook_ingest_total`, `aether_webhook_ingest_duration_seconds`, `aether_dispatch_attempts_total`, `aether_sqlite_write_errors_total`, `aether_http_requests_total`. Gated by `[metrics] enabled`: when false the exporter is not installed and the endpoint answers 404. Integration test asserts counter increment and exposition format.
+- **crucible**: Wave 1 empirical report — kill -9 durability (10/10 survive, integrity ok), WAL checkpoint bounded under 15k-event burst, idempotency race guard (1 row from 50 racing duplicates), zero SQLITE_BUSY under 100 concurrent requests.
+
 ## [0.2.0] - 2026-09-22
 
 ### Added

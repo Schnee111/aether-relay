@@ -40,6 +40,29 @@ pub enum AppError {
     Internal(String),
 }
 
+impl AppError {
+    /// HTTP status this error maps to. Kept separate from `into_response`
+    /// so non-response callers (metrics) can classify failures too.
+    pub fn status_code(&self) -> axum::http::StatusCode {
+        match self {
+            AppError::Config(_) | AppError::Database(_) | AppError::Internal(_) => {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            }
+            AppError::Unauthorized(_) | AppError::InvalidSignature => {
+                axum::http::StatusCode::UNAUTHORIZED
+            }
+            AppError::PayloadTooLarge => axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            AppError::BadRequest(_) | AppError::UnsupportedProvider(_) => {
+                axum::http::StatusCode::BAD_REQUEST
+            }
+            AppError::DuplicateIdempotencyKey { .. } | AppError::Conflict(_) => {
+                axum::http::StatusCode::CONFLICT
+            }
+            AppError::NotFound(_) => axum::http::StatusCode::NOT_FOUND,
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code, message) = match &self {
