@@ -16,6 +16,11 @@ pub struct CircuitBreaker {
     failure_threshold: u32,
     recovery_timeout: Duration,
     open_until: Option<Instant>,
+    /// Set while a single half-open probe is in flight. Without this, every
+    /// queued event is admitted the instant the recovery window elapses and
+    /// the whole backlog hits a downstream that has only just been given a
+    /// chance to recover.
+    probe_in_flight: bool,
 }
 
 impl CircuitBreaker {
@@ -26,6 +31,7 @@ impl CircuitBreaker {
             failure_threshold,
             recovery_timeout,
             open_until: None,
+            probe_in_flight: false,
         }
     }
 
@@ -41,7 +47,15 @@ impl CircuitBreaker {
 
     pub fn can_attempt(&mut self) -> bool {
         match self.state() {
-            CircuitState::Closed | CircuitState::HalfOpen => true,
+            CircuitState::Closed => true,
+            CircuitState::HalfOpen => {
+                if self.probe_in_flight {
+                    false
+                } else {
+                    self.probe_in_flight = true;
+                    true
+                }
+            }
             CircuitState::Open => false,
         }
     }
@@ -50,6 +64,7 @@ impl CircuitBreaker {
         self.failure_count = 0;
         self.state = CircuitState::Closed;
         self.open_until = None;
+        self.probe_in_flight = false;
     }
 
     pub fn record_failure(&mut self) {
@@ -58,6 +73,7 @@ impl CircuitBreaker {
             self.state = CircuitState::Open;
             self.open_until = Some(Instant::now() + self.recovery_timeout);
         }
+        self.probe_in_flight = false;
     }
 }
 

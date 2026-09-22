@@ -39,8 +39,8 @@ pub async fn list_dlq(
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut list = Vec::new();
-        for val in rows.flatten() {
-            list.push(val);
+        for val in rows {
+            list.push(val.map_err(|e| AppError::Database(e.to_string()))?);
         }
         Ok(list)
     })
@@ -78,6 +78,15 @@ pub async fn replay_dlq(
         conn.execute(
             "UPDATE incoming_events SET status = ?1 WHERE id = ?2",
             params![EventStatus::Received.as_str(), event_id],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // Clear the attempt history for this event. Attempts are counted with
+        // COUNT(*) on delivery_attempts, so without this the replayed event
+        // would be evicted straight back to the DLQ on its first failure.
+        conn.execute(
+            "DELETE FROM delivery_attempts WHERE event_id = ?1",
+            params![event_id],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 

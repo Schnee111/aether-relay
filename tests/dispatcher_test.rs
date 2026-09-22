@@ -29,12 +29,38 @@ fn test_circuit_breaker_lifecycle() {
     // Wait for recovery timeout
     std::thread::sleep(Duration::from_millis(60));
     assert_eq!(cb.state(), CircuitState::HalfOpen);
-    assert!(cb.can_attempt());
 
-    // Success in HalfOpen restores Closed
+    // HalfOpen admits exactly ONE probe. Every other queued event must wait,
+    // otherwise the whole backlog floods a downstream that has just been given
+    // a chance to recover.
+    assert!(cb.can_attempt(), "first caller becomes the probe");
+    assert!(
+        !cb.can_attempt(),
+        "second caller must be refused while the probe is in flight"
+    );
+    assert!(!cb.can_attempt(), "still refused while probe is in flight");
+
+    // A successful probe closes the circuit and clears the probe slot.
     cb.record_success();
     assert_eq!(cb.state(), CircuitState::Closed);
     assert!(cb.can_attempt());
+    assert!(cb.can_attempt(), "closed circuit admits everything again");
+}
+
+#[test]
+fn test_half_open_failed_probe_reopens_circuit() {
+    let mut cb = CircuitBreaker::new(1, Duration::from_millis(30));
+    cb.record_failure();
+    assert_eq!(cb.state(), CircuitState::Open);
+
+    std::thread::sleep(Duration::from_millis(40));
+    assert_eq!(cb.state(), CircuitState::HalfOpen);
+    assert!(cb.can_attempt());
+
+    // The probe fails -> circuit reopens and the probe slot is freed.
+    cb.record_failure();
+    assert_eq!(cb.state(), CircuitState::Open);
+    assert!(!cb.can_attempt());
 }
 
 #[tokio::test]
