@@ -1,4 +1,4 @@
-use aether_relay::{AppState, api, config, db};
+use aether_relay::{AppState, api, config, db, worker};
 use std::net::SocketAddr;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -35,6 +35,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app_config.database.cache_size,
     )?;
 
+    // Start the background dispatch worker. Without this the gateway would only
+    // ever accept events; nothing would deliver them downstream.
+    let breakers = worker::circuit_breaker::create_shared_breakers();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let worker_cfg = worker::runner::DispatchLoopConfig::from_app_config(&app_config);
+
+    tokio::spawn(worker::runner::run_dispatch_loop(
+        pool.clone(),
+        breakers,
+        client,
+        worker_cfg,
+    ));
+
     let state = AppState {
         pool,
         config: app_config.clone(),
@@ -47,7 +62,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+/// Drain in-flight requests on SIGINT instead of dropping them, so an
+/// ingestion that has already returned 202 is not lost mid-write.
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    info!("shutdown signal received, draining connections");
 }

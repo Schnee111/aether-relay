@@ -1,7 +1,7 @@
 use crate::db::DbPool;
 use crate::db::models::EventStatus;
 use crate::error::AppError;
-use crate::worker::circuit_breaker::SharedCircuitBreakers;
+use crate::worker::circuit_breaker::{CircuitBreaker, SharedCircuitBreakers};
 use reqwest::Client;
 use rusqlite::params;
 use std::time::Duration;
@@ -11,6 +11,23 @@ pub struct DispatchResult {
     pub success: bool,
     pub status_code: Option<u16>,
     pub error: Option<String>,
+    /// True when the event was withheld because the downstream circuit is open.
+    /// The event has been returned to the queue and must not consume an attempt.
+    pub deferred: bool,
+}
+
+/// Return a claimed event to the queue so the worker picks it up again.
+///
+/// A row left in PROCESSING is never re-claimed by anything, so every path that
+/// abandons a delivery without settling it has to call this.
+pub(crate) fn requeue_event(pool: &DbPool, event_id: &str) -> Result<(), AppError> {
+    let conn = pool.get().map_err(|e| AppError::Database(e.to_string()))?;
+    conn.execute(
+        "UPDATE incoming_events SET status = ?1 WHERE id = ?2",
+        params![EventStatus::Received.as_str(), event_id],
+    )
+    .map_err(|e| AppError::Database(e.to_string()))?;
+    Ok(())
 }
 
 pub async fn dispatch_single_event(
@@ -18,7 +35,7 @@ pub async fn dispatch_single_event(
     pool: &DbPool,
     breakers: &SharedCircuitBreakers,
     failure_threshold: u32,
-    recovery_secs: u64,
+    recovery: Duration,
     max_attempts: u32,
     event_id: &str,
 ) -> Result<DispatchResult, AppError> {
@@ -53,7 +70,7 @@ pub async fn dispatch_single_event(
                     params![ev_id],
                     |row| row.get(0),
                 )
-                .unwrap_or(0);
+                .map_err(|e| AppError::Database(e.to_string()))?;
 
             Ok((target_url, raw_body, endpoint_id, attempt_count))
         },
@@ -61,23 +78,32 @@ pub async fn dispatch_single_event(
     .await
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
-    // 2. Check Circuit Breaker
-    {
+    // 2. Check Circuit Breaker. The guard is scoped so it is released before any
+    // await below.
+    let circuit_open = {
         let mut map = breakers.write().unwrap();
-        let breaker = map.entry(endpoint_id.clone()).or_insert_with(|| {
-            crate::worker::circuit_breaker::CircuitBreaker::new(
-                failure_threshold,
-                Duration::from_secs(recovery_secs),
-            )
-        });
+        let breaker = map
+            .entry(endpoint_id.clone())
+            .or_insert_with(|| CircuitBreaker::new(failure_threshold, recovery));
+        !breaker.can_attempt()
+    };
 
-        if !breaker.can_attempt() {
-            return Ok(DispatchResult {
-                success: false,
-                status_code: None,
-                error: Some("Circuit breaker OPEN".into()),
-            });
-        }
+    if circuit_open {
+        // Hand the event straight back to the queue. Leaving it in PROCESSING
+        // would strand it forever, and charging it an attempt would burn the
+        // retry budget on a delivery that was never actually tried.
+        let requeue_pool = pool.clone();
+        let id = event_id.to_string();
+        tokio::task::spawn_blocking(move || requeue_event(&requeue_pool, &id))
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))??;
+
+        return Ok(DispatchResult {
+            success: false,
+            status_code: None,
+            error: Some("Circuit breaker OPEN".into()),
+            deferred: true,
+        });
     }
 
     // 3. Perform HTTP Dispatch
@@ -146,7 +172,7 @@ pub async fn dispatch_single_event(
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         } else if attempt_num >= max_attempts {
-            // Evict to DLQ
+            // Budget exhausted: park the event and record it for forensics.
             conn.execute(
                 "UPDATE incoming_events SET status = ?1 WHERE id = ?2",
                 params![EventStatus::Failed.as_str(), ev_id],
@@ -161,6 +187,15 @@ pub async fn dispatch_single_event(
                 params![dlq_id, ev_id, endpoint_id, reason, status_code, now],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
+        } else {
+            // Budget remains: hand the event back to the queue so the worker can
+            // retry it. Returning it to RECEIVED here is what makes retries
+            // actually happen; leaving it in PROCESSING would strand it.
+            conn.execute(
+                "UPDATE incoming_events SET status = ?1 WHERE id = ?2",
+                params![EventStatus::Received.as_str(), ev_id],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
         Ok(())
@@ -172,5 +207,6 @@ pub async fn dispatch_single_event(
         success,
         status_code,
         error: error_msg,
+        deferred: false,
     })
 }
