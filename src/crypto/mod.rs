@@ -27,7 +27,9 @@ impl FromStr for Provider {
             "midtrans" => Ok(Self::Midtrans),
             "discord" => Ok(Self::Discord),
             "generic" => Ok(Self::Generic),
-            other => Err(AppError::Internal(format!("Unsupported provider: {other}"))),
+            // A typo in the configured provider is a caller mistake, not a
+            // server fault: answer 400 rather than 500.
+            other => Err(AppError::UnsupportedProvider(other.to_string())),
         }
     }
 }

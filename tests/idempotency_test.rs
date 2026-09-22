@@ -2,7 +2,18 @@ use aether_relay::core::idempotency::{accept_event, transition_status};
 use aether_relay::db::migrations::run_migrations;
 use aether_relay::db::models::EventStatus;
 use aether_relay::error::AppError;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
+
+/// `incoming_events.endpoint_id` is a real foreign key, so an event cannot
+/// exist without its endpoint. Seed the parent row first.
+fn seed_endpoint(conn: &Connection, endpoint_id: &str) {
+    conn.execute(
+        "INSERT INTO endpoints (id, name, provider, secret, target_url, created_at)
+         VALUES (?1, 'Test', 'github', 'secret', 'https://example.com/hook', 1700000000)",
+        params![endpoint_id],
+    )
+    .unwrap();
+}
 
 #[test]
 fn test_idempotency_accept_and_duplicate() {
@@ -13,6 +24,8 @@ fn test_idempotency_accept_and_duplicate() {
     let key = "idem_key_123";
     let body = b"{\"event\":\"payment.succeeded\"}";
     let headers = "{\"content-type\":\"application/json\"}";
+
+    seed_endpoint(&conn, endpoint_id);
 
     // First attempt must succeed
     let event_id = accept_event(&mut conn, endpoint_id, key, body, headers).unwrap();
@@ -36,6 +49,8 @@ fn test_idempotency_accept_and_duplicate() {
 fn test_status_transitions() {
     let mut conn = Connection::open_in_memory().unwrap();
     run_migrations(&conn).unwrap();
+
+    seed_endpoint(&conn, "ep_1");
 
     let event_id = accept_event(&mut conn, "ep_1", "key_1", b"test", "{}").unwrap();
 

@@ -13,6 +13,9 @@ use rusqlite::params;
 use serde_json::json;
 use std::str::FromStr;
 
+/// Bounded so an oversized key cannot be persisted into the idempotency index.
+const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
+
 pub async fn handle_ingest(
     State(state): State<AppState>,
     Path(endpoint_id): Path<String>,
@@ -25,10 +28,18 @@ pub async fn handle_ingest(
 
     verify_api_key(&headers, &state.config.auth.api_keys)?;
 
+    // This header is a required part of the contract, not optional metadata.
+    // Answering 500 for a missing client header told the caller the server had
+    // broken when in fact their request was malformed.
     let idempotency_key = headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::Internal("Missing Idempotency-Key header".into()))?
+        .filter(|v| !v.is_empty() && v.len() <= MAX_IDEMPOTENCY_KEY_LEN)
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Missing or invalid Idempotency-Key header (must be 1..={MAX_IDEMPOTENCY_KEY_LEN} characters)"
+            ))
+        })?
         .to_string();
 
     let pool = state.pool.clone();
