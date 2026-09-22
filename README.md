@@ -85,7 +85,7 @@ flowchart TD
 
     DW -->|"HTTP POST"| DS["Downstream Services"]
 
-    OB["Observability\n/health · /metrics"]
+    OB["Observability\n/health · tracing"]
     IL -.-> OB
     DW -.-> OB
 ```
@@ -113,7 +113,8 @@ flowchart TD
 **Observability**
 - Structured JSON logging via `tracing-subscriber` with span-based request tracking.
 - Health endpoint (`GET /health`) returning status, version, and uptime.
-- Prometheus metrics endpoint (`GET /metrics`) with request duration histograms.
+
+> **Note:** A Prometheus `/metrics` endpoint is *planned but not implemented* in v0.2.0. Do not scrape it.
 
 ---
 

@@ -1,0 +1,34 @@
+# Build artifacts and caches
+target/
+**/target/
+
+# VCS
+.git/
+.gitignore
+
+# Node (legacy TS prototype / tooling)
+node_modules/
+**/node_modules/
+
+# Local databases and WAL sidecars — never bake these into an image
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/
+
+# Secrets and local config
+.env
+.env.*
+*.pem
+*.key
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# CI artifacts
+*.log
+coverage/

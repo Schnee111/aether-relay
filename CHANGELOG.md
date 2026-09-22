@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **api**: endpoint CRUD API (`POST/GET/DELETE /v1/endpoints`) for downstream webhook target registration (#4).
 - **docker**: multi-stage build pipeline producing static musl binary (< 10 MB) and scratch Docker image (< 20 MB total) (#4).
 - **ci**: GitHub Actions workflow enforcing cargo fmt, clippy --warnings-as-errors, test suite, cargo audit, and musl cross-compilation (#4).
-- **observability**: structured JSON logging via tracing-subscriber, health endpoint (`GET /health`), and Prometheus metrics routing (`GET /metrics`) (#4).
+- **observability**: structured JSON logging via tracing-subscriber and health endpoint (`GET /health`). A Prometheus `/metrics` endpoint is **not** implemented in this release.
 
 ### Changed
 - **rewrite**: full migration from TypeScript/Fastify prototype (v0.1.x) to native Rust/Axum implementation targeting 10× throughput improvement (#4).

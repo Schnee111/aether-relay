@@ -10,39 +10,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-test:
+  verify:
+    name: Build & Test Crucible
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.98.1
           components: clippy, rustfmt
           targets: x86_64-unknown-linux-musl
-      
-      - name: Cache dependencies
+
+      - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
-      
-      - name: Format check
+
+      - name: Check formatting
         run: cargo fmt --check
-      
-      - name: Clippy linting
+
+      - name: Static analysis (clippy)
         run: cargo clippy -- -D warnings
-      
-      - name: Run tests
+
+      - name: Run test suite
         run: cargo test
-      
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
       - name: Security audit
         run: cargo audit
-      
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          sudo ln -sf /usr/bin/musl-gcc /usr/local/bin/x86_64-linux-musl-gcc
+
       - name: Build musl binary
         run: cargo build --release --target x86_64-unknown-linux-musl
-        if: github.event_name == 'push'
-      
-      - name: Upload artifact
+
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: aether-relay-musl
           path: target/x86_64-unknown-linux-musl/release/aether-relay
           retention-days: 7
+          if-no-files-found: error

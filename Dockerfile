@@ -14,4 +14,7 @@ LABEL maintainer="Schnee <schnee@users.noreply.github.com>" \
 COPY --from=builder /aether-relay-binary /aether-relay
 COPY config/default.toml /config/default.toml
 EXPOSE 3000
+# Run unprivileged (65534 = nobody). Mount the SQLite data volume with
+# matching ownership: chown -R 65534:65534 ./data
+USER 65534:65534
 ENTRYPOINT ["/aether-relay"]
