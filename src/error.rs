@@ -18,8 +18,17 @@ pub enum AppError {
     #[error("Payload too large")]
     PayloadTooLarge,
 
+    #[error("Bad request: {0}")]
+    BadRequest(String),
+
+    #[error("Unsupported provider: {0}")]
+    UnsupportedProvider(String),
+
     #[error("Duplicate idempotency key: {status}")]
     DuplicateIdempotencyKey { status: String },
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
 
     #[error("Database error: {0}")]
     Database(String),
@@ -34,11 +43,19 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code, message) = match &self {
-            AppError::Config(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "CONFIG_ERROR",
-                e.to_string(),
-            ),
+            // Client-facing messages below carry only what the caller can act
+            // on. Internal detail (SQLite text, filesystem paths, upstream
+            // error strings) is logged and replaced with a generic message:
+            // leaking it tells an unauthenticated caller about the internals
+            // of the box and of every endpoint behind it.
+            AppError::Config(e) => {
+                tracing::error!(error = %e, "configuration error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "CONFIG_ERROR",
+                    GENERIC_INTERNAL.to_string(),
+                )
+            }
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg.clone()),
             AppError::InvalidSignature => (
                 StatusCode::UNAUTHORIZED,
@@ -50,22 +67,35 @@ impl IntoResponse for AppError {
                 "PAYLOAD_TOO_LARGE",
                 "Request body exceeds maximum allowed size".into(),
             ),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg.clone()),
+            AppError::UnsupportedProvider(p) => (
+                StatusCode::BAD_REQUEST,
+                "UNSUPPORTED_PROVIDER",
+                format!("Unsupported provider: {p}"),
+            ),
             AppError::DuplicateIdempotencyKey { status: st } => (
                 StatusCode::CONFLICT,
                 "IDEMPOTENCY_CONFLICT",
                 format!("Event with key already exists in state: {st}"),
             ),
-            AppError::Database(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DATABASE_ERROR",
-                msg.clone(),
-            ),
+            AppError::Database(e) => {
+                tracing::error!(error = %e, "database error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DATABASE_ERROR",
+                    GENERIC_INTERNAL.to_string(),
+                )
+            }
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg.clone()),
-            AppError::Internal(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                msg.clone(),
-            ),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg.clone()),
+            AppError::Internal(e) => {
+                tracing::error!(error = %e, "internal error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    GENERIC_INTERNAL.to_string(),
+                )
+            }
         };
 
         let body = Json(json!({
@@ -76,3 +106,6 @@ impl IntoResponse for AppError {
         (status, body).into_response()
     }
 }
+
+/// One message for every 5xx. Deliberately reveals nothing about the cause.
+const GENERIC_INTERNAL: &str = "Internal server error";

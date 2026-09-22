@@ -27,6 +27,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Initializing AetherRelay gateway"
     );
 
+    // An empty key list makes the API completely unauthenticated: every request
+    // that should carry X-Api-Key is served. That is a valid choice for a
+    // loopback-only test run, but it must never be a silent one.
+    if app_config.auth.api_keys.is_empty() {
+        tracing::warn!(
+            "auth.api_keys is empty: the management API is UNAUTHENTICATED. \
+             Anyone who can reach this port can create endpoints and replay \
+             the dead letter queue. Set RELAY__AUTH__API_KEYS or \
+             auth.api_keys before exposing this service."
+        );
+    }
+
     let pool = db::create_pool(
         &app_config.database.path,
         app_config.database.pool_size,

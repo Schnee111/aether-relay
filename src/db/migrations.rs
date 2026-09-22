@@ -1,5 +1,12 @@
 use rusqlite::{Connection, Result};
 
+/// Schema version, stored via `PRAGMA user_version`.
+///
+/// Bump this whenever a statement below changes, and add the corresponding
+/// migration step: a schema change that is not guarded by the version will
+/// silently apply to existing databases.
+pub const SCHEMA_VERSION: i64 = 1;
+
 pub const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS endpoints (
     id TEXT PRIMARY KEY,
@@ -18,7 +25,8 @@ CREATE TABLE IF NOT EXISTS incoming_events (
     headers TEXT NOT NULL,
     status TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    UNIQUE(endpoint_id, idempotency_key)
+    UNIQUE(endpoint_id, idempotency_key),
+    FOREIGN KEY(endpoint_id) REFERENCES endpoints(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_status ON incoming_events(status);
@@ -47,5 +55,14 @@ CREATE TABLE IF NOT EXISTS dead_letter_queue (
 "#;
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA_SQL)
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+    if current >= SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    conn.execute_batch(SCHEMA_SQL)?;
+    conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+
+    Ok(())
 }
